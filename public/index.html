@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenCI - AI Assistant</title>
+  <link rel="stylesheet" href="styles.css" />
+  <!-- Modern Font -->
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap"
+    rel="stylesheet" />
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+</head>
+
+<body data-theme="light">
+  <div class="app-container">
+    <!-- Hamburger Toggle Button -->
+    <button class="hamburger-toggle" id="hamburgerToggle" title="Toggle Sidebar">
+      <span></span>
+      <span></span>
+      <span></span>
+    </button>
+
+    <!-- Sidebar Overlay (Mobile) -->
+    <div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar" id="sidebar">
+      <!-- Brand Section -->
+      <div class="sidebar-brand">
+        <div class="brand-logo">
+          <img src="madridai.png" alt="OpenCI Logo" class="logo-img robot-img" id="sidebarMascot"
+            title="Toggle light/dark theme" />
+        </div>
+        <div class="brand-text">
+          <h1 class="brand-title"><span class="brand-sp">Open</span><span class="brand-ci">CI</span></h1>
+        </div>
+        <!-- Desktop Collapse Button -->
+        <button class="sidebar-collapse-btn" id="sidebarCollapseBtn" title="Collapse Sidebar">
+          <i class="fas fa-angle-double-left"></i>
+        </button>
+        <!-- Mobile Close Button -->
+        <button class="sidebar-close-btn" id="sidebarCloseBtn" title="Close Sidebar">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+
+      <!-- User Profile Section -->
+      <div class="user-profile-section">
+        <div class="profile-header">
+          <h3 class="profile-section-title">USER PROFILE</h3>
+          <button class="profile-toggle-btn" id="profileToggleBtn">
+            <i class="fas fa-chevron-down"></i>
+          </button>
+        </div>
+        <div class="profile-content" id="profileContent">
+          <div class="profile-item">
+            <label class="profile-label">NAME</label>
+            <div class="profile-value" id="profileName">User</div>
+          </div>
+          <div class="profile-item">
+            <label class="profile-label">ROLE</label>
+            <div class="profile-value" id="profileRole">Identifying...</div>
+          </div>
+          <div class="profile-item">
+            <div class="profile-location-header">
+              <label class="profile-label">LOCATION</label>
+              <button class="reload-location-btn" id="reloadLocationBtn" title="Refresh location">
+                <i class="fas fa-rotate-right"></i>
+              </button>
+            </div>
+            <div class="profile-value" id="profileLocation">Searching...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- OpenCI Services Section -->
+      <div class="services-section">
+        <h3 class="section-title">OPENCI SERVICES</h3>
+        <div class="services-list">
+          <div class="service-item">
+            <span class="service-bullet">•</span>
+            <span class="service-name">Credit Investigation (CI)</span>
+          </div>
+          <div class="service-item">
+            <span class="service-bullet">•</span>
+            <span class="service-name">Skips and Collect (SC)</span>
+          </div>
+          <div class="service-item">
+            <span class="service-bullet">•</span>
+            <span class="service-name">Demand Letter (DL)</span>
+          </div>
+          <div class="service-item">
+            <span class="service-bullet">•</span>
+            <span class="service-name">TeleCI</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Recent Chats Section -->
+      <div class="recent-chats-section">
+        <h3 class="section-title">RECENT CHATS</h3>
+        <button class="btn-new-chat" id="newChatBtn">
+          <i class="fas fa-plus"></i> NEW CHAT
+        </button>
+        <div class="chats-list" id="conversationsList">
+          <!-- Chats will be loaded here -->
+          <p class="no-chats-message">No sessions found.</p>
+        </div>
+      </div>
+
+      <!-- Footer Section -->
+      <div class="sidebar-footer"> <button class="settings-btn" id="settingsBtn">
+          <i class="fas fa-cog"></i> Settings
+        </button>
+        <footer class="app-footer">
+          <p>OpenCI Technical Support<br>S.P. Madrid & Associates</p>
+        </footer>
+      </div>
+    </aside>
+
+    <!-- Desktop Expand Button (visible when sidebar is collapsed on desktop) -->
+    <button class="sidebar-expand-btn" id="sidebarExpandBtn" title="Show Sidebar">
+      <i class="fas fa-angle-double-right"></i>
+    </button>
+
+    <!-- Main Chat Area -->
+    <main class="main-container">
+      <!-- Header -->
+      <header class="chat-header">
+        <div class="header-left">
+          <div class="header-info">
+            <h1 id="chatTitle"><span class="chat-title-sp">Open</span><span class="chat-title-assist">CI</span></h1>
+            <p class="header-subtitle" id="chatSubtitle">Ready to help</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button class="btn-auth btn-auth-login" id="loginBtn">
+            <img class="lark-logo" src="lark-logo.png" alt="Lark" width="22" height="22" />
+            <span class="btn-auth-text-gradient">Login with Lark</span>
+          </button>
+          <button class="btn-auth btn-auth-logout" id="logoutBtn" style="display:none;">
+            <span class="btn-auth-badge btn-auth-badge--red"><i class="fas fa-power-off"></i></span>
+            Logout
+          </button>
+        </div>
+      </header>
+
+      <!-- Messages Area -->
+      <div class="messages-wrapper" id="messagesWrapper">
+        <div class="messages-container" id="messagesContainer">
+          <!-- Suggested prompts will be rendered here by JS -->
+        </div>
+      </div>
+
+      <!-- Input Area -->
+      <footer class="chat-footer">
+        <form class="message-input-form" id="messageForm">
+          <div class="input-wrapper">
+            <button type="button" class="btn-attach" id="attachImageBtn" title="Attach image">
+              <span aria-hidden="true">+</span>
+            </button>
+            <div class="attach-menu" id="attachMenu" hidden>
+              <button type="button" class="attach-menu__item" id="addFilesBtn">
+                <i class="fas fa-paperclip"></i>
+                <span>Add photos &amp; files</span>
+              </button>
+            </div>
+            <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp" multiple hidden />
+            <div class="input-group">
+              <div class="image-preview" id="imagePreview" aria-live="polite" hidden>
+                <img class="image-preview__thumb" id="imagePreviewThumb" alt="Selected image preview" />
+                <span class="image-preview__name" id="imagePreviewName"></span>
+                <button type="button" class="image-preview__remove" id="removeImageBtn" title="Remove image">
+                  <i class="fas fa-times"></i>
+                </button>
+              </div>
+              <div class="input-row">
+                <input type="text" id="messageInput" class="message-input" placeholder="Ask me anything..." disabled />
+                <button type="submit" class="btn-send" id="sendBtn" disabled title="Send">
+                  <i class="fas fa-paper-plane"></i>
+                </button>
+              </div>
+            </div>
+          </div>
+        </form>
+        <!-- Rate Limit Countdown (under input) -->
+        <div class="rate-limit-countdown" id="rateLimitCountdown" style="display:none;">
+          <p class="countdown-text" id="countdownText">Paused for <span id="countdownSeconds">15</span> seconds...</p>
+        </div>
+        <p class="ai-disclaimer">Responses are generated by AI and may contain mistakes.</p>
+      </footer>
+    </main>
+  </div>
+
+  <!-- Settings Modal -->
+  <div class="modal" id="settingsModal">
+
+    <!-- Role Selection Modal (shown after first Lark login) -->
+    <div class="modal role-modal" id="roleModal" style="display:none;">
+      <div class="modal-content role-modal-content">
+        <div class="modal-header">
+          <h2>Select Your Role</h2>
+        </div>
+        <div class="modal-body role-modal-body">
+          <p>Welcome! Please select your role to continue:</p>
+          <div class="role-buttons">
+            <button class="role-btn role-btn-admin" id="selectAdminBtn">
+              <i class="fas fa-user-shield"></i>
+              <span>Admin</span>
+            </button>
+            <button class="role-btn role-btn-fieldman" id="selectFieldmanBtn">
+              <i class="fas fa-hard-hat"></i>
+              <span>Fieldman</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-content settings-panel">
+      <div class="modal-header">
+        <h2>Settings</h2>
+        <button class="close-btn" id="closeSettingsBtn">×</button>
+      </div>
+      <div class="modal-body">
+        <!-- User Profile -->
+        <div class="settings-section">
+          <h3>User Profile</h3>
+          <div class="profile-section">
+            <div class="profile-avatar">
+              <i class="fas fa-user-circle"></i>
+            </div>
+            <div class="profile-info">
+              <input type="text" id="userName" class="input-field" placeholder="Your name" value="User" />
+              <input type="email" id="userEmail" class="input-field" placeholder="Your email" />
+            </div>
+          </div>
+        </div>
+
+        <!-- Preferences -->
+        <div class="settings-section">
+          <h3>Preferences</h3>
+          <div class="preference-item">
+            <div class="preference-label">
+              <label>Theme</label>
+              <select id="themeSelect" class="input-field">
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+                <option value="auto">Auto (System)</option>
+              </select>
+            </div>
+          </div>
+          <div class="preference-item">
+            <label class="checkbox-label">
+              <input type="checkbox" id="autoScrollCheck" checked />
+              Auto-scroll to latest message
+            </label>
+          </div>
+          <div class="preference-item">
+            <label class="checkbox-label">
+              <input type="checkbox" id="notificationsCheck" />
+              Enable notifications
+            </label>
+          </div>
+        </div>
+
+        <!-- Conversation Management -->
+        <div class="settings-section">
+          <h3>Conversation Management</h3>
+          <button class="btn btn-secondary btn-block" id="clearConversationsBtn">
+            <i class="fas fa-trash"></i> Clear All Conversations
+          </button>
+          <button class="btn btn-secondary btn-block" id="exportDataBtn">
+            <i class="fas fa-download"></i> Export Conversations
+          </button>
+        </div>
+
+        <!-- About -->
+        <div class="settings-section">
+          <h3>About</h3>
+          <p class="about-text">
+            <strong>OpenCI</strong> - OpenCI Intelligent AI Help Desk Assistant<br>
+            Version 2.0<br>
+            Powered by advanced AI technology
+          </p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="saveSettingsBtn">Save Settings</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal Overlay -->
+  <div class="modal-overlay" id="modalOverlay"></div>
+
+  <!-- Slider Puzzle CAPTCHA Modal -->
+  <div class="captcha-modal" id="captchaModal" style="display:none;">
+    <div class="captcha-modal-backdrop"></div>
+    <div class="captcha-modal-content">
+      <div class="captcha-modal-top">
+        <h2 class="captcha-title">Security Check</h2>
+        <button class="captcha-close-btn" id="captchaCloseBtn" title="Close">&times;</button>
+      </div>
+
+      <!-- Step 1: Checkbox -->
+      <div class="captcha-checkbox-step" id="captchaCheckboxStep">
+        <label class="captcha-robot-label" for="captchaRobotCheck">
+          <div class="captcha-robot-checkwrap">
+            <input type="checkbox" id="captchaRobotCheck" class="captcha-robot-input" />
+            <span class="captcha-robot-box"></span>
+          </div>
+          <span class="captcha-robot-text">I'm not a robot</span>
+          <div class="captcha-robot-brand">
+            <i class="fas fa-shield-alt captcha-brand-icon"></i>
+            <span class="captcha-brand-name">OpenCI</span>
+            <span class="captcha-brand-sub">Secure</span>
+          </div>
+        </label>
+      </div>
+
+      <!-- Step 2: Puzzle (hidden until checkbox clicked) -->
+      <div class="captcha-puzzle-step" id="captchaPuzzleStep" style="display:none;">
+        <p class="captcha-puzzle-hint">Drag the piece to fill the gap</p>
+        <div class="captcha-canvas-wrap">
+          <canvas id="captchaCanvas" width="320" height="180"></canvas>
+          <canvas id="captchaPieceCanvas" width="320" height="180" class="captcha-piece"></canvas>
+        </div>
+        <div class="captcha-slider-area" id="captchaSliderArea">
+          <div class="captcha-slider-track" id="captchaSliderTrack"></div>
+          <div class="captcha-slider-thumb" id="captchaSliderThumb">
+            <span class="slider-arrows">|||</span>
+          </div>
+          <span class="captcha-slider-hint">Slide →</span>
+        </div>
+        <div class="captcha-bottom">
+          <button class="captcha-refresh-link" id="captchaRefreshBtn"><i class="fas fa-sync-alt"></i> Refresh</button>
+        </div>
+        <p class="captcha-error" id="captchaError" style="display:none;"></p>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Friendly Error Overlay -->
+  <div class="error-overlay" id="errorOverlay" style="display:none;">
+    <!-- Animated geometric shapes -->
+    <div class="error-shapes">
+      <div class="error-shape error-shape--circle error-shape--1"></div>
+      <div class="error-shape error-shape--square error-shape--2"></div>
+      <div class="error-shape error-shape--triangle error-shape--3"></div>
+      <div class="error-shape error-shape--circle error-shape--4"></div>
+      <div class="error-shape error-shape--diamond error-shape--5"></div>
+      <div class="error-shape error-shape--square error-shape--6"></div>
+      <div class="error-shape error-shape--circle error-shape--7"></div>
+      <div class="error-shape error-shape--triangle error-shape--8"></div>
+    </div>
+    <div class="error-card">
+      <div class="error-icon-circle">
+        <i class="fas fa-exclamation"></i>
+      </div>
+      <h1 class="error-title">Oops!</h1>
+      <h2 class="error-subtitle">Something went wrong</h2>
+      <p class="error-message">Don't worry, even the best applications have hiccups sometimes. Let's get you back on
+        track!</p>
+      <div class="error-buttons">
+        <button class="error-btn error-btn--primary" id="errorTryAgainBtn">
+          <i class="fas fa-redo"></i> Try Again
+        </button>
+        <button class="error-btn error-btn--secondary" id="errorGoHomeBtn">
+          <i class="fas fa-home"></i> Go Home
+        </button>
+      </div>
+      <details class="error-details">
+        <summary>Error Details (Development)</summary>
+        <pre id="errorTechnicalDetails">No details available.</pre>
+      </details>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+
+</html>
