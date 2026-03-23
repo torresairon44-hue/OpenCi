@@ -31,7 +31,7 @@ interface SearchResult {
 class VectorStore {
   private pool: Pool;
   private embeddingModel = 'models/text-embedding-004';
-  private embeddingDimension = 3072; // Gemini embedding output dimension
+  private embeddingDimension = 768; // Keep under pgvector ivfflat 2000-dimension limit
   private embeddingErrorLogWindowStart = 0;
   private embeddingErrorLogCount = 0;
   private discoveredEmbeddingModel: string | null = null;
@@ -140,6 +140,7 @@ class VectorStore {
         `https://generativelanguage.googleapis.com/v1beta/${model}:embedContent?key=${apiKey}`,
         {
           model,
+          outputDimensionality: this.embeddingDimension,
           content: {
             parts: [{ text }]
           }
