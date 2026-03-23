@@ -88,6 +88,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Check if the user is already logged in (JWT cookie via /api/auth/me)
   await checkAuthSession();
 
+  // Load CAPTCHA provider configuration.
+  await loadCaptchaConfig();
+
   // Initialize event listeners
   setupEventListeners();
 
@@ -1714,6 +1717,103 @@ const CAPTCHA_FAIL_LOCKOUT_SEC = 5 * 60; // 5 minutes
 let messageTimestamps = [];
 let rateLimitPaused = false;
 let countdownInterval = null;
+let turnstileEnabled = false;
+let turnstileSiteKey = '';
+let turnstileWidgetId = null;
+
+async function loadCaptchaConfig() {
+  try {
+    const response = await fetch('/api/captcha/config', { credentials: 'include' });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (data && data.enabled === true && typeof data.siteKey === 'string' && data.siteKey.trim()) {
+      turnstileEnabled = true;
+      turnstileSiteKey = data.siteKey.trim();
+    }
+  } catch (error) {
+    console.warn('Captcha config unavailable, using local fallback captcha.', error);
+  }
+}
+
+function getTurnstileApi() {
+  return window.turnstile && typeof window.turnstile.render === 'function'
+    ? window.turnstile
+    : null;
+}
+
+function completeCaptchaSuccess() {
+  hideCaptcha();
+  resetRateLimit();
+  messageInput.focus();
+}
+
+function showCaptchaFailure(message) {
+  const errorEl = document.getElementById('captchaError');
+  if (errorEl) {
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+  }
+
+  setTimeout(() => {
+    hideCaptcha();
+    startRateLimitPause(CAPTCHA_FAIL_LOCKOUT_SEC);
+  }, 1200);
+}
+
+async function verifyTurnstileToken(token) {
+  try {
+    const response = await fetch('/api/captcha/verify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ token }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || data.success !== true) {
+      showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
+      return;
+    }
+
+    completeCaptchaSuccess();
+  } catch (error) {
+    console.error('Turnstile verification request failed:', error);
+    showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
+  }
+}
+
+function renderTurnstileWidget() {
+  if (!turnstileEnabled || !turnstileSiteKey) return;
+
+  const turnstileApi = getTurnstileApi();
+  const widgetHost = document.getElementById('captchaTurnstileWidget');
+  if (!turnstileApi || !widgetHost) {
+    return;
+  }
+
+  if (turnstileWidgetId !== null) {
+    try {
+      turnstileApi.reset(turnstileWidgetId);
+    } catch (error) {
+      console.warn('Turnstile reset warning:', error);
+    }
+    return;
+  }
+
+  turnstileWidgetId = turnstileApi.render('#captchaTurnstileWidget', {
+    sitekey: turnstileSiteKey,
+    theme: 'light',
+    callback: (token) => {
+      verifyTurnstileToken(token);
+    },
+    'expired-callback': () => {
+      showCaptchaFailure('Verification expired. Locked out for 5 minutes.');
+    },
+    'error-callback': () => {
+      showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
+    },
+  });
+}
 
 function checkRateLimit() {
   if (rateLimitPaused) return false;
@@ -1951,6 +2051,15 @@ function showCaptcha() {
 function hideCaptcha() {
   const modal = document.getElementById('captchaModal');
   if (modal) modal.style.display = 'none';
+
+  const turnstileApi = getTurnstileApi();
+  if (turnstileApi && turnstileWidgetId !== null) {
+    try {
+      turnstileApi.reset(turnstileWidgetId);
+    } catch (error) {
+      console.warn('Turnstile reset warning:', error);
+    }
+  }
 }
 
 function verifyCaptcha(finalOffset) {
@@ -1963,9 +2072,7 @@ function verifyCaptcha(finalOffset) {
     // ✅ Success
     if (sliderThumb) sliderThumb.className = 'captcha-slider-thumb success';
     setTimeout(() => {
-      hideCaptcha();
-      resetRateLimit();
-      messageInput.focus();
+      completeCaptchaSuccess();
     }, 500);
   } else {
     // ❌ Fail
@@ -1986,6 +2093,10 @@ document.addEventListener('DOMContentLoaded', () => {
   const sliderThumb = document.getElementById('captchaSliderThumb');
   const sliderTrack = document.getElementById('captchaSliderTrack');
   const sliderArea = document.getElementById('captchaSliderArea');
+  const canvasWrap = document.querySelector('.captcha-canvas-wrap');
+  const turnstileWrap = document.getElementById('captchaTurnstileWrap');
+  const captchaBottom = document.querySelector('.captcha-bottom');
+  const puzzleHint = document.querySelector('.captcha-puzzle-hint');
   const pieceCanvas = document.getElementById('captchaPieceCanvas');
   const hintEl = document.querySelector('.captcha-slider-hint');
   const refreshBtn = document.getElementById('captchaRefreshBtn');
@@ -2012,7 +2123,22 @@ document.addEventListener('DOMContentLoaded', () => {
             void puzzleStep.offsetHeight;
             puzzleStep.style.opacity = '1';
           }
-          generateCaptchaPuzzle();
+
+          if (turnstileEnabled) {
+            if (turnstileWrap) turnstileWrap.style.display = 'block';
+            if (canvasWrap) canvasWrap.style.display = 'none';
+            if (sliderArea) sliderArea.style.display = 'none';
+            if (captchaBottom) captchaBottom.style.display = 'none';
+            if (puzzleHint) puzzleHint.textContent = 'Complete verification to continue';
+            renderTurnstileWidget();
+          } else {
+            if (turnstileWrap) turnstileWrap.style.display = 'none';
+            if (canvasWrap) canvasWrap.style.display = 'block';
+            if (sliderArea) sliderArea.style.display = 'flex';
+            if (captchaBottom) captchaBottom.style.display = 'flex';
+            if (puzzleHint) puzzleHint.textContent = 'Drag the piece to fill the gap';
+            generateCaptchaPuzzle();
+          }
         }, 250);
       }
     });

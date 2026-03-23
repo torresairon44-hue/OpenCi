@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { body, param, validationResult } from 'express-validator';
 import xss from 'xss';
@@ -9,7 +10,7 @@ import { runQuery, executeQuery } from './database';
 import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment } from './ai-service';
 import { getCoordinates, getLocationFromCoordinates, formatCoordinates } from './location-service';
 import { requireAuth } from './auth';
-import { chatRateLimiter } from './rate-limiter';
+import { chatRateLimiter, resetRateLimit } from './rate-limiter';
 
 // Sanitization helper
 const sanitizeInput = (input: string): string => {
@@ -37,6 +38,8 @@ const OCR_TIMEOUT_MS = 10_000;
 const OCR_MAX_CHARS_PER_IMAGE = 2_500;
 const OCR_MAX_TOTAL_CHARS = 6_000;
 const OCR_CONCURRENCY = 2;
+const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || '';
+const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
 
 const chatImageUpload = multer({
   storage: multer.memoryStorage(),
@@ -906,6 +909,60 @@ chatRouter.get('/health', (_req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
   });
 });
+
+// Captcha client configuration endpoint.
+chatRouter.get('/captcha/config', (_req: Request, res: Response) => {
+  const enabled = TURNSTILE_SITE_KEY.length > 0 && TURNSTILE_SECRET_KEY.length > 0;
+  res.json({
+    provider: 'turnstile',
+    enabled,
+    siteKey: enabled ? TURNSTILE_SITE_KEY : null,
+  });
+});
+
+// Verify Turnstile token server-side and reset limiter bucket on success.
+chatRouter.post(
+  '/captcha/verify',
+  body('token').isString().isLength({ min: 1, max: 4096 }),
+  handleValidationErrors,
+  async (req: Request, res: Response) => {
+    if (!TURNSTILE_SECRET_KEY) {
+      res.status(503).json({ success: false, error: 'captcha_not_configured' });
+      return;
+    }
+
+    const token = String(req.body.token || '');
+
+    try {
+      const payload = new URLSearchParams();
+      payload.append('secret', TURNSTILE_SECRET_KEY);
+      payload.append('response', token);
+      if (req.ip) {
+        payload.append('remoteip', req.ip);
+      }
+
+      const verifyRes = await axios.post(
+        'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+        payload.toString(),
+        {
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 8000,
+        }
+      );
+
+      if (verifyRes.data?.success !== true) {
+        res.status(400).json({ success: false, error: 'captcha_invalid' });
+        return;
+      }
+
+      resetRateLimit(req);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Turnstile verification failed:', error);
+      res.status(502).json({ success: false, error: 'captcha_verification_failed' });
+    }
+  }
+);
 
 // Anonymous chat — no persistence, ephemeral session
 chatRouter.post(
