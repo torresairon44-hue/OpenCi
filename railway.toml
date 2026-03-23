@@ -3,7 +3,7 @@ builder = "NIXPACKS"
 buildCommand = "NPM_CONFIG_CACHE=/tmp/.npm npm install --include=dev --no-audit --no-fund && npm run build"
 
 [deploy]
-startCommand = "npm start"
+startCommand = "node dist/index.js"
 healthcheckPath = "/healthz"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
