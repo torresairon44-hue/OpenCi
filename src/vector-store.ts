@@ -53,7 +53,7 @@ class VectorStore {
       // Create documents table with vector column
       await client.query(`
         CREATE TABLE IF NOT EXISTS openci_documents (
-          id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+          id TEXT PRIMARY KEY,
           content TEXT NOT NULL,
           type VARCHAR(50) NOT NULL,
           source VARCHAR(255),
@@ -68,6 +68,14 @@ class VectorStore {
       await client.query(`
         ALTER TABLE openci_documents ADD COLUMN IF NOT EXISTS access_level VARCHAR(20) NOT NULL DEFAULT 'authenticated';
       `);
+
+      // Migrate id column to TEXT for stable deterministic doc IDs (e.g., module-ci, faq-banks).
+      await client.query(`
+        ALTER TABLE openci_documents
+        ALTER COLUMN id TYPE TEXT USING id::text;
+      `).catch(() => {
+        // No-op if already TEXT or if migration isn't needed.
+      });
 
       // Create index for efficient vector searches
       await client.query(`
