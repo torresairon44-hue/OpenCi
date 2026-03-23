@@ -236,8 +236,7 @@ app.get('*', (_req: Request, res: Response) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
-// Initialize database and start server
-async function startServer() {
+async function initializeEnhancedServices(): Promise<void> {
   try {
     await initializeDatabase();
     console.log('✅ Database initialized successfully');
@@ -268,19 +267,30 @@ async function startServer() {
       openCIAPI: getOpenCIAPI(),
       loadSampleDocs: true, // Load sample documents on startup
     });
-
-    app.listen(PORT, HOST, () => {
-      console.log(`\n🚀 Server is running at http://${HOST}:${PORT}`);
-      console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`✨ Version: OpenCI ChatBot v2.0 (Icio) with enhanced capabilities`);
-      if (!isGoogleAIConnected()) {
-        console.log('💡 To enable real AI, add your GROQ_API_KEY to .env');
-      }
-    });
   } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
+    // Keep HTTP service alive even if optional integrations fail.
+    console.error('⚠ Startup integrations failed, continuing in degraded mode:', error);
   }
+}
+
+// Start HTTP server first so platform health checks can pass while integrations warm up.
+function startServer() {
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`\n🚀 Server is running at http://${HOST}:${PORT}`);
+    console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`✨ Version: OpenCI ChatBot v2.0 (Icio) with enhanced capabilities`);
+  });
+
+  server.on('error', (error) => {
+    console.error('❌ HTTP server failed to start:', error);
+    process.exit(1);
+  });
+
+  initializeEnhancedServices().finally(() => {
+    if (!isGoogleAIConnected()) {
+      console.log('💡 To enable real AI, add your GROQ_API_KEY to .env');
+    }
+  });
 }
 
 if (require.main === module) {
