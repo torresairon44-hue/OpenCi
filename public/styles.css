@@ -2592,10 +2592,11 @@ body {
 }
 
 .conversation-actions {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  display: flex;
+  align-items: center;
   gap: 4px;
-  width: 100%;
+  width: auto;
+  flex-shrink: 0;
   opacity: 0;
   transition: opacity 0.2s ease;
 }
