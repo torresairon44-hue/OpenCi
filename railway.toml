@@ -4,7 +4,7 @@ buildCommand = "NPM_CONFIG_CACHE=/tmp/.npm npm install --include=dev --no-audit 
 
 [deploy]
 startCommand = "npm start"
-healthcheckPath = "/api/health"
+healthcheckPath = "/healthz"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

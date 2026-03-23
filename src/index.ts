@@ -21,6 +21,7 @@ dotenv.config();
 const app: Express = express();
 const requestedPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const PORT = requestedPort === 3100 ? 3000 : requestedPort;
+const HOST = '0.0.0.0';
 
 if (requestedPort === 3100) {
   console.warn('⚠ PORT=3100 is blocked by project policy. Falling back to port 3000.');
@@ -39,6 +40,14 @@ function createAnonymousId(): string {
 }
 
 app.set('trust proxy', parseTrustProxy(process.env.TRUST_PROXY));
+
+// Platform health endpoint kept outside rate limits and auth to avoid false restarts.
+app.get('/healthz', (_req: Request, res: Response) => {
+  res.status(200).json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Security Middleware
 app.use(helmet({
@@ -260,8 +269,8 @@ async function startServer() {
       loadSampleDocs: true, // Load sample documents on startup
     });
 
-    app.listen(PORT, () => {
-      console.log(`\n🚀 Server is running at http://localhost:${PORT}`);
+    app.listen(PORT, HOST, () => {
+      console.log(`\n🚀 Server is running at http://${HOST}:${PORT}`);
       console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
       console.log(`✨ Version: OpenCI ChatBot v2.0 (Icio) with enhanced capabilities`);
       if (!isGoogleAIConnected()) {
