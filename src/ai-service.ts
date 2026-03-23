@@ -15,7 +15,31 @@ const AI_RESPONSE_DELAY_MS = parseInt(process.env.AI_RESPONSE_DELAY_MS || '3000'
 const GOOGLE_VISION_MODEL = process.env.GOOGLE_VISION_MODEL || 'gemini-1.5-flash';
 let groqConnected = false;
 let availableModel = '';
+let groqLimitDetected = false;
 const googleAIClient = googleAIKey ? new GoogleGenerativeAI(googleAIKey) : null;
+
+export class AIProviderLimitError extends Error {
+  provider: 'groq' | 'google';
+  statusCode?: number;
+
+  constructor(provider: 'groq' | 'google', message: string, statusCode?: number) {
+    super(message);
+    this.name = 'AIProviderLimitError';
+    this.provider = provider;
+    this.statusCode = statusCode;
+  }
+}
+
+function isProviderLimitError(error: any): boolean {
+  const status = Number(error?.response?.status || 0);
+  const raw = JSON.stringify(error?.response?.data || error?.message || '').toLowerCase();
+  if (status === 429) return true;
+  if (status === 402) return true;
+  if (status === 403 && /(quota|rate.?limit|insufficient_quota|resource_exhausted|resource exhausted|billing)/i.test(raw)) {
+    return true;
+  }
+  return /(quota|rate.?limit|insufficient_quota|resource_exhausted|resource exhausted)/i.test(raw);
+}
 
 // OPTION B & C Integration
 let vectorStore: VectorStore | null = null;
@@ -408,8 +432,15 @@ Latest user message: ${normalizedUserMessage}`;
         return { text: cleanedText, detectedRole };
       }
     } catch (error: any) {
+      if (isProviderLimitError(error)) {
+        throw new AIProviderLimitError('google', 'Google AI quota or rate limit reached', Number(error?.response?.status || 0));
+      }
       console.log(`❌ ${GOOGLE_VISION_MODEL} image processing failed:`, error?.message || error);
     }
+  }
+
+  if (apiKey && groqLimitDetected) {
+    throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', 429);
   }
 
   if (availableModel && apiKey) {
@@ -442,6 +473,10 @@ Latest user message: ${normalizedUserMessage}`;
         return { text: cleanedText, detectedRole };
       }
     } catch (error: any) {
+      if (isProviderLimitError(error)) {
+        groqLimitDetected = true;
+        throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', Number(error?.response?.status || 429));
+      }
       console.log(`❌ ${availableModel} failed:`, error?.response?.data || error.message);
     }
   }
@@ -587,6 +622,9 @@ export async function testConnection(): Promise<boolean> {
       const statusCode = error?.response?.status;
       const statusText = error?.response?.statusText;
       const errorData = error?.response?.data;
+      if (isProviderLimitError(error)) {
+        groqLimitDetected = true;
+      }
       console.log(`   ❌ API Error: ${statusCode} ${statusText || ''}`);
       if (errorData) {
         console.log(`      Message: ${JSON.stringify(errorData).substring(0, 150)}`);

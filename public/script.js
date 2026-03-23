@@ -18,6 +18,8 @@ let pendingSuggestedPrompt = false;
 let pendingImages = [];
 const LANDING_STATE_FADE_MS = 280;
 const DEFAULT_CHAT_TITLE = 'OpenCI Help Desk';
+let aiServiceHardBlocked = false;
+let aiServiceBlockReason = '';
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -74,6 +76,38 @@ function setVisibleChatTitle(title) {
   }
 
   chatTitle.textContent = title && title.trim() ? title : DEFAULT_CHAT_TITLE;
+}
+
+function setComposerEnabled(enabled) {
+  messageInput.disabled = !enabled;
+  sendBtn.disabled = !enabled;
+  if (attachImageBtn) {
+    attachImageBtn.disabled = !enabled;
+  }
+}
+
+async function buildHttpError(response) {
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (_err) {
+    payload = null;
+  }
+
+  const details = payload?.error || payload?.message || (Array.isArray(payload?.errors) && payload.errors[0]?.msg) || '';
+  const error = new Error(`HTTP error! status: ${response.status}${details ? ` - ${details}` : ''}`);
+  error.status = response.status;
+  error.code = payload?.error || null;
+  error.provider = payload?.provider || null;
+  error.details = details;
+  return error;
+}
+
+function activateAIServiceBlock(details) {
+  aiServiceHardBlocked = true;
+  aiServiceBlockReason = details || 'AI provider quota/rate limit reached. Chat is temporarily unavailable.';
+  setComposerEnabled(false);
+  showFriendlyError('AI service limit reached', aiServiceBlockReason);
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -621,6 +655,11 @@ async function sendMessage() {
     return;
   }
 
+  if (aiServiceHardBlocked) {
+    showFriendlyError('AI service limit reached', aiServiceBlockReason || 'AI provider limit is active. Please try again later.');
+    return;
+  }
+
   // Check frontend rate limit
   if (!checkRateLimit()) {
     return; // Rate limited — countdown/CAPTCHA flow handles UI
@@ -678,14 +717,7 @@ async function sendMessage() {
       }
       pendingSuggestedPrompt = false;
       if (!response.ok) {
-        let details = '';
-        try {
-          const errorData = await response.json();
-          details = errorData?.error || errorData?.message || (Array.isArray(errorData?.errors) && errorData.errors[0]?.msg) || '';
-        } catch (_err) {
-          // Ignore JSON parse failure and keep generic status text.
-        }
-        throw new Error(`HTTP error! status: ${response.status}${details ? ` - ${details}` : ''}`);
+        throw await buildHttpError(response);
       }
       data = await response.json();
       anonymousHistory.push({ role: 'assistant', content: data.aiMessage.content });
@@ -727,14 +759,7 @@ async function sendMessage() {
         });
       }
       if (!response.ok) {
-        let details = '';
-        try {
-          const errorData = await response.json();
-          details = errorData?.error || errorData?.message || (Array.isArray(errorData?.errors) && errorData.errors[0]?.msg) || '';
-        } catch (_err) {
-          // Ignore JSON parse failure and keep generic status text.
-        }
-        throw new Error(`HTTP error! status: ${response.status}${details ? ` - ${details}` : ''}`);
+        throw await buildHttpError(response);
       }
       data = await response.json();
     }
@@ -773,17 +798,22 @@ async function sendMessage() {
   } catch (error) {
     hideTypingIndicator();
     console.error('Error sending message:', error);
+    if (error?.code === 'ai_provider_limit_reached' || (error?.status === 503 && /quota|limit/i.test(error?.message || ''))) {
+      activateAIServiceBlock(error?.details || `Provider: ${error?.provider || 'unknown'}`);
+      return;
+    }
     // Check if it's a rate limit error from backend
-    if (error.message && error.message.includes('429')) {
+    if ((typeof error?.status === 'number' && error.status === 429) || (error.message && error.message.includes('429'))) {
       startRateLimitPause(15);
     } else {
       showFriendlyError('Failed to send message', error.toString());
     }
   } finally {
     isLoading = false;
-    messageInput.disabled = false;
-    sendBtn.disabled = false;
-    messageInput.focus();
+    if (!aiServiceHardBlocked) {
+      setComposerEnabled(true);
+      messageInput.focus();
+    }
   }
 }
 
@@ -2014,6 +2044,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (tryAgainBtn) {
     tryAgainBtn.addEventListener('click', () => {
+      if (aiServiceHardBlocked) {
+        showFriendlyError('AI service limit reached', aiServiceBlockReason || 'AI provider limit is active. Please try again later.');
+        return;
+      }
       hideFriendlyError();
       // Try to resend or just let user try again
       messageInput.focus();
