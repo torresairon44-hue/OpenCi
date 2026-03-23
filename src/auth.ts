@@ -64,7 +64,7 @@ authRouter.get('/lark', (req: Request, res: Response) => {
   const redirectUri = encodeURIComponent(callbackUrl);
   const scope = 'contact:user.base:readonly';
   const larkAuthUrl =
-    `https://open.feishu.cn/open-apis/authen/v1/authorize` +
+    `https://open.larksuite.com/open-apis/authen/v1/authorize` +
     `?app_id=${LARK_APP_ID}&redirect_uri=${redirectUri}&scope=${scope}`;
   res.redirect(larkAuthUrl);
 });
@@ -82,7 +82,7 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
   try {
     // Step 1: Get app access token
     const appTokenRes = await axios.post(
-      'https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal',
+      'https://open.larksuite.com/open-apis/auth/v3/app_access_token/internal',
       { app_id: LARK_APP_ID, app_secret: LARK_APP_SECRET },
       { headers: { 'Content-Type': 'application/json' } }
     );
@@ -94,7 +94,7 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
 
     // Step 2: Exchange authorization code for user access token
     const userTokenRes = await axios.post(
-      'https://open.feishu.cn/open-apis/authen/v1/oidc/access_token',
+      'https://open.larksuite.com/open-apis/authen/v1/oidc/access_token',
       { grant_type: 'authorization_code', code },
       {
         headers: {
@@ -111,7 +111,7 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
 
     // Step 3: Fetch user profile from Lark
     const userInfoRes = await axios.get(
-      'https://open.feishu.cn/open-apis/authen/v1/user_info',
+      'https://open.larksuite.com/open-apis/authen/v1/user_info',
       { headers: { Authorization: `Bearer ${userAccessToken}` } }
     );
     const larkUser = userInfoRes.data.data;

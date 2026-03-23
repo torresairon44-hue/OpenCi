@@ -101,7 +101,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
+  max: 600, // Limit each IP to 600 requests per windowMs
   message: 'Too many requests from this IP, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
@@ -116,7 +116,7 @@ if (disableGlobalRateLimit) {
 // API rate limiting (stricter)
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300, // Increased from 30 to 300 for normal usage
+  max: 1200, // Increased for shared-IP production traffic
   message: 'Too many API requests, please try again later.',
 });
 
