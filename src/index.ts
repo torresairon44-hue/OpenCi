@@ -18,6 +18,14 @@ import { initializeAll } from './init-utils';
 // Load environment variables
 dotenv.config();
 
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠ Unhandled promise rejection:', reason);
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('⚠ Uncaught exception:', error);
+});
+
 const app: Express = express();
 const requestedPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const PORT = requestedPort === 3100 ? 3000 : requestedPort;
