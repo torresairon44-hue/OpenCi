@@ -2,6 +2,7 @@ import { Router, Request, Response, NextFunction } from 'express';
 import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
+import { randomBytes } from 'crypto';
 import { runQuery, executeQuery } from './database';
 import { startSession, updateSessionInfo, stopSession } from './session-service';
 
@@ -10,11 +11,11 @@ import { startSession, updateSessionInfo, stopSession } from './session-service'
 // ─────────────────────────────────────────────────────────────
 const LARK_APP_ID = process.env.LARK_APP_ID || '';
 const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
-const JWT_SECRET = process.env.JWT_SECRET as string;
+let JWT_SECRET = process.env.JWT_SECRET as string;
 if (!JWT_SECRET || JWT_SECRET === 'change-this-secret-in-production') {
-  console.error('❌ FATAL ERROR: JWT_SECRET environment variable is not set or is using the default placeholder.');
-  console.error('Please set a strong, random JWT_SECRET in your .env file.');
-  process.exit(1);
+  console.error('⚠ JWT_SECRET is missing or using a placeholder. Using an in-memory fallback secret for this runtime.');
+  console.error('⚠ Set a strong JWT_SECRET in Railway Variables to avoid session invalidation on restart.');
+  JWT_SECRET = randomBytes(32).toString('hex');
 }
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
 
