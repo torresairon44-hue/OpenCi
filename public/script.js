@@ -1717,27 +1717,33 @@ const CAPTCHA_FAIL_LOCKOUT_SEC = 5 * 60; // 5 minutes
 let messageTimestamps = [];
 let rateLimitPaused = false;
 let countdownInterval = null;
-let turnstileEnabled = false;
-let turnstileSiteKey = '';
-let turnstileWidgetId = null;
+let recaptchaEnabled = false;
+let recaptchaSiteKey = '';
+let recaptchaWidgetId = null;
 
 async function loadCaptchaConfig() {
   try {
     const response = await fetch('/api/captcha/config', { credentials: 'include' });
     if (!response.ok) return;
     const data = await response.json();
-    if (data && data.enabled === true && typeof data.siteKey === 'string' && data.siteKey.trim()) {
-      turnstileEnabled = true;
-      turnstileSiteKey = data.siteKey.trim();
+    if (
+      data &&
+      data.provider === 'recaptcha' &&
+      data.enabled === true &&
+      typeof data.siteKey === 'string' &&
+      data.siteKey.trim()
+    ) {
+      recaptchaEnabled = true;
+      recaptchaSiteKey = data.siteKey.trim();
     }
   } catch (error) {
     console.warn('Captcha config unavailable, using local fallback captcha.', error);
   }
 }
 
-function getTurnstileApi() {
-  return window.turnstile && typeof window.turnstile.render === 'function'
-    ? window.turnstile
+function getRecaptchaApi() {
+  return window.grecaptcha && typeof window.grecaptcha.render === 'function'
+    ? window.grecaptcha
     : null;
 }
 
@@ -1760,7 +1766,7 @@ function showCaptchaFailure(message) {
   }, 1200);
 }
 
-async function verifyTurnstileToken(token) {
+async function verifyRecaptchaToken(token) {
   try {
     const response = await fetch('/api/captcha/verify', {
       method: 'POST',
@@ -1777,34 +1783,34 @@ async function verifyTurnstileToken(token) {
 
     completeCaptchaSuccess();
   } catch (error) {
-    console.error('Turnstile verification request failed:', error);
+    console.error('reCAPTCHA verification request failed:', error);
     showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
   }
 }
 
-function renderTurnstileWidget() {
-  if (!turnstileEnabled || !turnstileSiteKey) return;
+function renderRecaptchaWidget() {
+  if (!recaptchaEnabled || !recaptchaSiteKey) return;
 
-  const turnstileApi = getTurnstileApi();
-  const widgetHost = document.getElementById('captchaTurnstileWidget');
-  if (!turnstileApi || !widgetHost) {
+  const recaptchaApi = getRecaptchaApi();
+  const widgetHost = document.getElementById('captchaRecaptchaWidget');
+  if (!recaptchaApi || !widgetHost) {
     return;
   }
 
-  if (turnstileWidgetId !== null) {
+  if (recaptchaWidgetId !== null) {
     try {
-      turnstileApi.reset(turnstileWidgetId);
+      recaptchaApi.reset(recaptchaWidgetId);
     } catch (error) {
-      console.warn('Turnstile reset warning:', error);
+      console.warn('reCAPTCHA reset warning:', error);
     }
     return;
   }
 
-  turnstileWidgetId = turnstileApi.render('#captchaTurnstileWidget', {
-    sitekey: turnstileSiteKey,
+  recaptchaWidgetId = recaptchaApi.render('captchaRecaptchaWidget', {
+    sitekey: recaptchaSiteKey,
     theme: 'light',
     callback: (token) => {
-      verifyTurnstileToken(token);
+      verifyRecaptchaToken(token);
     },
     'expired-callback': () => {
       showCaptchaFailure('Verification expired. Locked out for 5 minutes.');
@@ -2052,12 +2058,12 @@ function hideCaptcha() {
   const modal = document.getElementById('captchaModal');
   if (modal) modal.style.display = 'none';
 
-  const turnstileApi = getTurnstileApi();
-  if (turnstileApi && turnstileWidgetId !== null) {
+  const recaptchaApi = getRecaptchaApi();
+  if (recaptchaApi && recaptchaWidgetId !== null) {
     try {
-      turnstileApi.reset(turnstileWidgetId);
+      recaptchaApi.reset(recaptchaWidgetId);
     } catch (error) {
-      console.warn('Turnstile reset warning:', error);
+      console.warn('reCAPTCHA reset warning:', error);
     }
   }
 }
@@ -2094,7 +2100,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const sliderTrack = document.getElementById('captchaSliderTrack');
   const sliderArea = document.getElementById('captchaSliderArea');
   const canvasWrap = document.querySelector('.captcha-canvas-wrap');
-  const turnstileWrap = document.getElementById('captchaTurnstileWrap');
+  const recaptchaWrap = document.getElementById('captchaRecaptchaWrap');
   const captchaBottom = document.querySelector('.captcha-bottom');
   const puzzleHint = document.querySelector('.captcha-puzzle-hint');
   const pieceCanvas = document.getElementById('captchaPieceCanvas');
@@ -2124,15 +2130,15 @@ document.addEventListener('DOMContentLoaded', () => {
             puzzleStep.style.opacity = '1';
           }
 
-          if (turnstileEnabled) {
-            if (turnstileWrap) turnstileWrap.style.display = 'block';
+          if (recaptchaEnabled) {
+            if (recaptchaWrap) recaptchaWrap.style.display = 'block';
             if (canvasWrap) canvasWrap.style.display = 'none';
             if (sliderArea) sliderArea.style.display = 'none';
             if (captchaBottom) captchaBottom.style.display = 'none';
             if (puzzleHint) puzzleHint.textContent = 'Complete verification to continue';
-            renderTurnstileWidget();
+            renderRecaptchaWidget();
           } else {
-            if (turnstileWrap) turnstileWrap.style.display = 'none';
+            if (recaptchaWrap) recaptchaWrap.style.display = 'none';
             if (canvasWrap) canvasWrap.style.display = 'block';
             if (sliderArea) sliderArea.style.display = 'flex';
             if (captchaBottom) captchaBottom.style.display = 'flex';

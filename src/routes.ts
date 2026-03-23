@@ -38,8 +38,8 @@ const OCR_TIMEOUT_MS = 10_000;
 const OCR_MAX_CHARS_PER_IMAGE = 2_500;
 const OCR_MAX_TOTAL_CHARS = 6_000;
 const OCR_CONCURRENCY = 2;
-const TURNSTILE_SITE_KEY = process.env.TURNSTILE_SITE_KEY || '';
-const TURNSTILE_SECRET_KEY = process.env.TURNSTILE_SECRET_KEY || '';
+const RECAPTCHA_SITE_KEY = process.env.RECAPTCHA_SITE_KEY || '';
+const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || '';
 
 const chatImageUpload = multer({
   storage: multer.memoryStorage(),
@@ -912,21 +912,21 @@ chatRouter.get('/health', (_req: Request, res: Response) => {
 
 // Captcha client configuration endpoint.
 chatRouter.get('/captcha/config', (_req: Request, res: Response) => {
-  const enabled = TURNSTILE_SITE_KEY.length > 0 && TURNSTILE_SECRET_KEY.length > 0;
+  const enabled = RECAPTCHA_SITE_KEY.length > 0 && RECAPTCHA_SECRET_KEY.length > 0;
   res.json({
-    provider: 'turnstile',
+    provider: 'recaptcha',
     enabled,
-    siteKey: enabled ? TURNSTILE_SITE_KEY : null,
+    siteKey: enabled ? RECAPTCHA_SITE_KEY : null,
   });
 });
 
-// Verify Turnstile token server-side and reset limiter bucket on success.
+// Verify reCAPTCHA token server-side and reset limiter bucket on success.
 chatRouter.post(
   '/captcha/verify',
   body('token').isString().isLength({ min: 1, max: 4096 }),
   handleValidationErrors,
   async (req: Request, res: Response) => {
-    if (!TURNSTILE_SECRET_KEY) {
+    if (!RECAPTCHA_SECRET_KEY) {
       res.status(503).json({ success: false, error: 'captcha_not_configured' });
       return;
     }
@@ -935,14 +935,14 @@ chatRouter.post(
 
     try {
       const payload = new URLSearchParams();
-      payload.append('secret', TURNSTILE_SECRET_KEY);
+      payload.append('secret', RECAPTCHA_SECRET_KEY);
       payload.append('response', token);
       if (req.ip) {
         payload.append('remoteip', req.ip);
       }
 
       const verifyRes = await axios.post(
-        'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+        'https://www.google.com/recaptcha/api/siteverify',
         payload.toString(),
         {
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -958,7 +958,7 @@ chatRouter.post(
       resetRateLimit(req);
       res.json({ success: true });
     } catch (error) {
-      console.error('Turnstile verification failed:', error);
+      console.error('reCAPTCHA verification failed:', error);
       res.status(502).json({ success: false, error: 'captcha_verification_failed' });
     }
   }

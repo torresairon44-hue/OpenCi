@@ -324,8 +324,8 @@
       <!-- Step 2: Puzzle (hidden until checkbox clicked) -->
       <div class="captcha-puzzle-step" id="captchaPuzzleStep" style="display:none;">
         <p class="captcha-puzzle-hint">Drag the piece to fill the gap</p>
-        <div class="captcha-turnstile-wrap" id="captchaTurnstileWrap" style="display:none;">
-          <div id="captchaTurnstileWidget"></div>
+        <div class="captcha-recaptcha-wrap" id="captchaRecaptchaWrap" style="display:none;">
+          <div id="captchaRecaptchaWidget"></div>
         </div>
         <div class="captcha-canvas-wrap">
           <canvas id="captchaCanvas" width="320" height="180"></canvas>
@@ -383,7 +383,7 @@
     </div>
   </div>
 
-  <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+  <script src="https://www.google.com/recaptcha/api.js?render=explicit" async defer></script>
   <script src="script.js"></script>
 </body>
 
