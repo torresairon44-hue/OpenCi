@@ -56,6 +56,13 @@ app.get('/healthz', (_req: Request, res: Response) => {
   });
 });
 
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  if (req.path === '/healthz' || req.path === '/' || req.path === '/api/health') {
+    console.log(`📡 Request received: ${req.method} ${req.path}`);
+  }
+  next();
+});
+
 // Security Middleware
 app.use(helmet({
   contentSecurityPolicy: {
