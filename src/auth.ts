@@ -120,10 +120,12 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
       return;
     }
 
-    // Debug: log full Lark profile to understand available fields
-    console.log('=== LARK USER PROFILE DATA ===');
-    console.log(JSON.stringify(larkUser, null, 2));
-    console.log('==============================');
+      // Log only minimal, non-sensitive auth audit info.
+      console.log('Lark login success:', {
+        openId: larkUser.open_id,
+        name: larkUser.name || larkUser.en_name || 'Unknown',
+        tenant: larkUser.tenant_key || 'Unknown',
+      });
 
     const larkId: string = larkUser.open_id;
     const name: string = larkUser.name || larkUser.en_name || 'Unknown';
