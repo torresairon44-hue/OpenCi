@@ -271,8 +271,11 @@ async function initializeEnhancedServices(): Promise<void> {
     // OPTION B: Initialize Vector Store with pgvector
     console.log('\n📚 Initializing enhanced services...');
     const pool = getPool();
-    if (pool) {
+    const hasGoogleEmbeddingKey = Boolean((process.env.GOOGLE_AI_API_KEY || '').trim());
+    if (pool && hasGoogleEmbeddingKey) {
       await initializeVectorStore(pool);
+    } else if (pool && !hasGoogleEmbeddingKey) {
+      console.log('ℹ Vector Store: skipped (GOOGLE_AI_API_KEY not configured; Groq-only mode)');
     } else {
       console.log('⚠  Vector Store: PostgreSQL not available (in-memory mode)');
     }
@@ -284,7 +287,7 @@ async function initializeEnhancedServices(): Promise<void> {
     await initializeAll({
       vectorStore: getVectorStore(),
       openCIAPI: getOpenCIAPI(),
-      loadSampleDocs: true, // Load sample documents on startup
+      loadSampleDocs: hasGoogleEmbeddingKey, // Load sample docs only when embedding key exists
     });
   } catch (error) {
     // Keep HTTP service alive even if optional integrations fail.
