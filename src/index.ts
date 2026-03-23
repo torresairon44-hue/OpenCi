@@ -21,7 +21,6 @@ dotenv.config();
 const app: Express = express();
 const requestedPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const PORT = requestedPort === 3100 ? 3000 : requestedPort;
-const HOST = '0.0.0.0';
 
 if (requestedPort === 3100) {
   console.warn('⚠ PORT=3100 is blocked by project policy. Falling back to port 3000.');
@@ -275,8 +274,8 @@ async function initializeEnhancedServices(): Promise<void> {
 
 // Start HTTP server first so platform health checks can pass while integrations warm up.
 function startServer() {
-  const server = app.listen(PORT, HOST, () => {
-    console.log(`\n🚀 Server is running at http://${HOST}:${PORT}`);
+  const server = app.listen(PORT, () => {
+    console.log(`\n🚀 Server is running on port ${PORT}`);
     console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`✨ Version: OpenCI ChatBot v2.0 (Icio) with enhanced capabilities`);
   });
