@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "npm ci --include=dev && npm run build"
+buildCommand = "NPM_CONFIG_CACHE=/tmp/.npm npm install --include=dev --no-audit --no-fund && npm run build"
 
 [deploy]
 startCommand = "npm start"
