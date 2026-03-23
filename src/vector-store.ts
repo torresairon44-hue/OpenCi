@@ -30,8 +30,10 @@ interface SearchResult {
 
 class VectorStore {
   private pool: Pool;
-  private embeddingModel = 'text-embedding-3-small'; // Using Google's embedding model
+  private embeddingModel = 'models/text-embedding-004';
   private embeddingDimension = 384; // Dimension for the chosen model
+  private embeddingErrorLogWindowStart = 0;
+  private embeddingErrorLogCount = 0;
 
   constructor(pool: Pool) {
     this.pool = pool;
@@ -101,17 +103,38 @@ class VectorStore {
         throw new Error('GOOGLE_AI_API_KEY not configured');
       }
 
-      // Using Google's embedding API
-      const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent?key=${apiKey}`,
-        {
-          model: 'models/embedding-001',
-          content: {
-            parts: [{ text }]
-          }
-        },
-        { timeout: 5000 }
-      );
+      // Prefer current embedding model and fall back for older projects.
+      const modelCandidates = [
+        'models/text-embedding-004',
+        'models/embedding-001',
+      ];
+
+      let response: any = null;
+      let lastError: any = null;
+
+      for (const model of modelCandidates) {
+        try {
+          response = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/${model}:embedContent?key=${apiKey}`,
+            {
+              model,
+              content: {
+                parts: [{ text }]
+              }
+            },
+            { timeout: 5000 }
+          );
+          this.embeddingModel = model;
+          break;
+        } catch (error) {
+          lastError = error;
+          this.logEmbeddingError(error, model);
+        }
+      }
+
+      if (!response) {
+        throw lastError || new Error('Embedding request failed for all model candidates');
+      }
 
       const embedding = response.data?.embedding?.values;
       if (!embedding || !Array.isArray(embedding)) {
@@ -120,11 +143,31 @@ class VectorStore {
 
       return embedding;
     } catch (error) {
-      console.error('Error generating embedding:', error);
+      this.logEmbeddingError(error, this.embeddingModel);
       // Re-throw error to propagate it up and fail gracefully
       // Don't return dummy embedding as it distorts results
       throw error;
     }
+  }
+
+  private logEmbeddingError(error: any, model: string): void {
+    const now = Date.now();
+    if (now - this.embeddingErrorLogWindowStart > 60000) {
+      this.embeddingErrorLogWindowStart = now;
+      this.embeddingErrorLogCount = 0;
+    }
+
+    const status = error?.response?.status;
+    const code = error?.response?.data?.error?.code || error?.code;
+    const message = error?.response?.data?.error?.message || error?.message || 'Unknown error';
+
+    if (this.embeddingErrorLogCount < 5) {
+      console.error(`Embedding request failed (${model}) status=${status ?? 'n/a'} code=${code ?? 'n/a'} message=${message}`);
+    } else if (this.embeddingErrorLogCount === 5) {
+      console.error('Embedding error log limit reached for this minute; suppressing additional repeated logs.');
+    }
+
+    this.embeddingErrorLogCount += 1;
   }
 
   /**
@@ -159,7 +202,7 @@ class VectorStore {
 
       return result.rows[0].id;
     } catch (error) {
-      console.error('Error adding document to vector store:', error);
+      console.error(`Error adding document to vector store: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
   }
@@ -212,7 +255,7 @@ class VectorStore {
 
       return result.rows;
     } catch (error) {
-      console.error('Error searching documents:', error);
+      console.error(`Error searching documents: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;
     }
   }
@@ -250,7 +293,7 @@ class VectorStore {
         JSON.stringify(embedding)
       ]);
     } catch (error) {
-      console.error('Error adding conversation embedding:', error);
+      console.error(`Error adding conversation embedding: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -280,7 +323,7 @@ class VectorStore {
 
       return result.rows;
     } catch (error) {
-      console.error('Error finding similar conversations:', error);
+      console.error(`Error finding similar conversations: ${error instanceof Error ? error.message : 'Unknown error'}`);
       return [];
     }
   }
@@ -302,7 +345,8 @@ class VectorStore {
           console.log(`  ✓ Added ${successful}/${documents.length} documents`);
         }
       } catch (error) {
-        console.error(`Failed to add document ${doc.id}:`, error);
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        console.error(`Failed to add document ${doc.id}: ${message}`);
         failed++;
       }
     }
