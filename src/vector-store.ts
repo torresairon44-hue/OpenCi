@@ -31,7 +31,7 @@ interface SearchResult {
 class VectorStore {
   private pool: Pool;
   private embeddingModel = 'models/text-embedding-004';
-  private embeddingDimension = 384; // Dimension for the chosen model
+  private embeddingDimension = 3072; // Gemini embedding output dimension
   private embeddingErrorLogWindowStart = 0;
   private embeddingErrorLogCount = 0;
   private discoveredEmbeddingModel: string | null = null;
@@ -77,6 +77,19 @@ class VectorStore {
         // No-op if already TEXT or if migration isn't needed.
       });
 
+      // Ensure embedding column dimension matches configured embedding dimension.
+      await client.query(`
+        ALTER TABLE openci_documents
+        ALTER COLUMN embedding TYPE vector(${this.embeddingDimension});
+      `).catch(async () => {
+        // If existing data has incompatible vector dimension, clear and migrate.
+        await client.query('UPDATE openci_documents SET embedding = NULL;');
+        await client.query(`
+          ALTER TABLE openci_documents
+          ALTER COLUMN embedding TYPE vector(${this.embeddingDimension});
+        `);
+      });
+
       // Create index for efficient vector searches
       await client.query(`
         CREATE INDEX IF NOT EXISTS openci_documents_embedding_idx 
@@ -95,6 +108,17 @@ class VectorStore {
           created_at TIMESTAMP DEFAULT NOW()
         );
       `);
+
+      await client.query(`
+        ALTER TABLE conversation_embeddings
+        ALTER COLUMN embedding TYPE vector(${this.embeddingDimension});
+      `).catch(async () => {
+        await client.query('UPDATE conversation_embeddings SET embedding = NULL;');
+        await client.query(`
+          ALTER TABLE conversation_embeddings
+          ALTER COLUMN embedding TYPE vector(${this.embeddingDimension});
+        `);
+      });
 
       console.log('✓ Conversation embeddings table created');
     } finally {
