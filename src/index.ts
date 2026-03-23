@@ -289,14 +289,30 @@ async function initializeEnhancedServices(): Promise<void> {
 
 // Start HTTP server first so platform health checks can pass while integrations warm up.
 function startServer() {
-  const server = app.listen(PORT, () => {
-    console.log(`\n🚀 Server is running on port ${PORT}`);
+  const onListening = (bindLabel: string) => {
+    console.log(`\n🚀 Server is running on port ${PORT} (${bindLabel})`);
     console.log(`📝 Environment: ${process.env.NODE_ENV || 'development'}`);
     console.log(`✨ Version: OpenCI ChatBot v2.0 (Icio) with enhanced capabilities`);
-  });
+  };
+
+  const startIPv4Fallback = () => {
+    const fallbackServer = app.listen(PORT, '0.0.0.0', () => onListening('ipv4'));
+    fallbackServer.on('error', (error) => {
+      console.error('❌ HTTP server failed to start (ipv4):', error);
+      process.exit(1);
+    });
+  };
+
+  const server = app.listen(PORT, '::', () => onListening('ipv6'));
 
   server.on('error', (error) => {
-    console.error('❌ HTTP server failed to start:', error);
+    const anyError = error as any;
+    if (anyError?.code === 'EAFNOSUPPORT' || anyError?.code === 'EADDRNOTAVAIL') {
+      console.warn('⚠ IPv6 bind unavailable, retrying on IPv4...');
+      startIPv4Fallback();
+      return;
+    }
+    console.error('❌ HTTP server failed to start (ipv6):', error);
     process.exit(1);
   });
 
