@@ -34,6 +34,7 @@ class VectorStore {
   private embeddingDimension = 384; // Dimension for the chosen model
   private embeddingErrorLogWindowStart = 0;
   private embeddingErrorLogCount = 0;
+  private discoveredEmbeddingModel: string | null = null;
 
   constructor(pool: Pool) {
     this.pool = pool;
@@ -102,39 +103,18 @@ class VectorStore {
       if (!apiKey) {
         throw new Error('GOOGLE_AI_API_KEY not configured');
       }
-
-      // Prefer current embedding model and fall back for older projects.
-      const modelCandidates = [
-        'models/text-embedding-004',
-        'models/embedding-001',
-      ];
-
-      let response: any = null;
-      let lastError: any = null;
-
-      for (const model of modelCandidates) {
-        try {
-          response = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/${model}:embedContent?key=${apiKey}`,
-            {
-              model,
-              content: {
-                parts: [{ text }]
-              }
-            },
-            { timeout: 5000 }
-          );
-          this.embeddingModel = model;
-          break;
-        } catch (error) {
-          lastError = error;
-          this.logEmbeddingError(error, model);
-        }
-      }
-
-      if (!response) {
-        throw lastError || new Error('Embedding request failed for all model candidates');
-      }
+      const model = await this.resolveEmbeddingModel(apiKey);
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/${model}:embedContent?key=${apiKey}`,
+        {
+          model,
+          content: {
+            parts: [{ text }]
+          }
+        },
+        { timeout: 5000 }
+      );
+      this.embeddingModel = model;
 
       const embedding = response.data?.embedding?.values;
       if (!embedding || !Array.isArray(embedding)) {
@@ -148,6 +128,50 @@ class VectorStore {
       // Don't return dummy embedding as it distorts results
       throw error;
     }
+  }
+
+  private async resolveEmbeddingModel(apiKey: string): Promise<string> {
+    if (this.discoveredEmbeddingModel) {
+      return this.discoveredEmbeddingModel;
+    }
+
+    const fallbackCandidates = [
+      'models/text-embedding-004',
+      'models/embedding-001',
+    ];
+
+    try {
+      const response = await axios.get(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+        { timeout: 5000 }
+      );
+
+      const models = Array.isArray(response.data?.models) ? response.data.models : [];
+      const supportsEmbed = (m: any) => {
+        const methods = Array.isArray(m?.supportedGenerationMethods) ? m.supportedGenerationMethods : [];
+        return methods.includes('embedContent') || methods.includes('batchEmbedContents');
+      };
+
+      const availableEmbedModels = models
+        .filter((m: any) => supportsEmbed(m))
+        .map((m: any) => String(m.name || ''))
+        .filter((name: string) => name.startsWith('models/'));
+
+      const preferred = fallbackCandidates.find((candidate) => availableEmbedModels.includes(candidate));
+      const chosen = preferred || availableEmbedModels.find((name: string) => /embed/i.test(name));
+
+      if (chosen) {
+        this.discoveredEmbeddingModel = chosen;
+        console.log(`✓ Using embedding model: ${chosen}`);
+        return chosen;
+      }
+    } catch (error) {
+      this.logEmbeddingError(error, 'model-discovery');
+    }
+
+    // Last resort: try known defaults in order.
+    this.discoveredEmbeddingModel = fallbackCandidates[0];
+    return this.discoveredEmbeddingModel;
   }
 
   private logEmbeddingError(error: any, model: string): void {
