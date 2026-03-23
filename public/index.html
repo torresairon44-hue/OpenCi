@@ -296,7 +296,7 @@
   <!-- Modal Overlay -->
   <div class="modal-overlay" id="modalOverlay"></div>
 
-  <!-- Slider Puzzle CAPTCHA Modal -->
+  <!-- reCAPTCHA Modal -->
   <div class="captcha-modal" id="captchaModal" style="display:none;">
     <div class="captcha-modal-backdrop"></div>
     <div class="captcha-modal-content">
@@ -304,45 +304,11 @@
         <h2 class="captcha-title">Security Check</h2>
         <button class="captcha-close-btn" id="captchaCloseBtn" title="Close">&times;</button>
       </div>
-
-      <!-- Step 1: Checkbox -->
-      <div class="captcha-checkbox-step" id="captchaCheckboxStep">
-        <label class="captcha-robot-label" for="captchaRobotCheck">
-          <div class="captcha-robot-checkwrap">
-            <input type="checkbox" id="captchaRobotCheck" class="captcha-robot-input" />
-            <span class="captcha-robot-box"></span>
-          </div>
-          <span class="captcha-robot-text">I'm not a robot</span>
-          <div class="captcha-robot-brand">
-            <i class="fas fa-shield-alt captcha-brand-icon"></i>
-            <span class="captcha-brand-name">OpenCI</span>
-            <span class="captcha-brand-sub">Secure</span>
-          </div>
-        </label>
+      <p class="captcha-hint">Complete reCAPTCHA verification to continue</p>
+      <div class="captcha-recaptcha-wrap" id="captchaRecaptchaWrap">
+        <div id="captchaRecaptchaWidget"></div>
       </div>
-
-      <!-- Step 2: Puzzle (hidden until checkbox clicked) -->
-      <div class="captcha-puzzle-step" id="captchaPuzzleStep" style="display:none;">
-        <p class="captcha-puzzle-hint">Drag the piece to fill the gap</p>
-        <div class="captcha-recaptcha-wrap" id="captchaRecaptchaWrap" style="display:none;">
-          <div id="captchaRecaptchaWidget"></div>
-        </div>
-        <div class="captcha-canvas-wrap">
-          <canvas id="captchaCanvas" width="320" height="180"></canvas>
-          <canvas id="captchaPieceCanvas" width="320" height="180" class="captcha-piece"></canvas>
-        </div>
-        <div class="captcha-slider-area" id="captchaSliderArea">
-          <div class="captcha-slider-track" id="captchaSliderTrack"></div>
-          <div class="captcha-slider-thumb" id="captchaSliderThumb">
-            <span class="slider-arrows">|||</span>
-          </div>
-          <span class="captcha-slider-hint">Slide →</span>
-        </div>
-        <div class="captcha-bottom">
-          <button class="captcha-refresh-link" id="captchaRefreshBtn"><i class="fas fa-sync-alt"></i> Refresh</button>
-        </div>
-        <p class="captcha-error" id="captchaError" style="display:none;"></p>
-      </div>
+      <p class="captcha-error" id="captchaError" style="display:none;"></p>
 
     </div>
   </div>

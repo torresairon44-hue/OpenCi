@@ -1936,122 +1936,22 @@ function restoreRateLimitState() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SLIDER PUZZLE CAPTCHA
+// CAPTCHA MODAL (reCAPTCHA only)
 // ═══════════════════════════════════════════════════════════════
-let captchaX = 0;
-let captchaY = 0;
-let isCaptchaDragging = false;
-let captchaDragStartX = 0;
-const CAPTCHA_PIECE_SIZE = 40;
-const CAPTCHA_TOLERANCE = 8;
-
-function generateCaptchaPuzzle() {
-  const canvas = document.getElementById('captchaCanvas');
-  const pieceCanvas = document.getElementById('captchaPieceCanvas');
-  const sliderTrack = document.getElementById('captchaSliderTrack');
-  const sliderThumb = document.getElementById('captchaSliderThumb');
-  const errorEl = document.getElementById('captchaError');
-  const hintEl = document.querySelector('.captcha-slider-hint');
-
-  if (!canvas || !pieceCanvas) return;
-
-  const ctx = canvas.getContext('2d');
-  const pieceCtx = pieceCanvas.getContext('2d');
-
-  // Reset UI
-  if (errorEl) errorEl.style.display = 'none';
-  if (sliderTrack) sliderTrack.style.width = '44px'; // just the thumb width
-  if (sliderThumb) {
-    sliderThumb.style.transform = 'translateX(0px)';
-    sliderThumb.className = 'captcha-slider-thumb';
-  }
-  if (pieceCanvas) pieceCanvas.style.transform = 'translateX(0px)';
-  if (hintEl) hintEl.style.opacity = '1';
-
-  isCaptchaDragging = false;
-
-  // Randomize puzzle hole position (keep it right-ish so there's room to drag)
-  captchaX = Math.floor(Math.random() * (250 - 140)) + 140;
-  captchaY = Math.floor(Math.random() * (110 - 20)) + 20;
-
-  // Use the local images from public/ root
-  const img = new Image();
-  const randomImageId = Math.floor(Math.random() * 4) + 1; // 1 to 4
-  img.src = `/assets/captcha/captcha${randomImageId}.jpg`;
-
-  img.onload = () => {
-    // 1. Draw full image
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-    // 2. Extract puzzle piece
-    pieceCtx.clearRect(0, 0, pieceCanvas.width, pieceCanvas.height);
-    pieceCtx.save();
-    pieceCtx.beginPath();
-    const paddingX = 10;
-    drawJigsawPath(pieceCtx, paddingX, captchaY, CAPTCHA_PIECE_SIZE);
-    pieceCtx.clip();
-    pieceCtx.drawImage(img, paddingX - captchaX, 0, canvas.width, canvas.height);
-    pieceCtx.lineWidth = 2;
-    pieceCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
-    pieceCtx.stroke();
-    pieceCtx.restore();
-
-    // 3. Draw dark hole on main canvas
-    ctx.save();
-    ctx.beginPath();
-    drawJigsawPath(ctx, captchaX, captchaY, CAPTCHA_PIECE_SIZE);
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
-    ctx.stroke();
-    ctx.restore();
-
-    pieceCanvas.style.transform = 'translateX(0px)';
-  };
-
-  img.onerror = () => {
-    ctx.fillStyle = '#64748b';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = '14px sans-serif';
-    ctx.fillText('Image failed to load. Try Refresh.', 50, 90);
-  };
-}
-
-function drawJigsawPath(ctx, x, y, size) {
-  const r = size / 4;
-  ctx.moveTo(x, y);
-  ctx.lineTo(x + size / 2 - r, y);
-  ctx.arc(x + size / 2, y, r, Math.PI, 0, false);
-  ctx.lineTo(x + size, y);
-  ctx.lineTo(x + size, y + size / 2 - r);
-  ctx.arc(x + size, y + size / 2, r, -Math.PI / 2, Math.PI / 2, false);
-  ctx.lineTo(x + size, y + size);
-  ctx.lineTo(x + size / 2 + r, y + size);
-  ctx.arc(x + size / 2, y + size, r, 0, Math.PI, true);
-  ctx.lineTo(x, y + size);
-  ctx.lineTo(x, y + size / 2 + r);
-  ctx.arc(x, y + size / 2, r, Math.PI / 2, -Math.PI / 2, true);
-  ctx.lineTo(x, y);
-}
-
 function showCaptcha() {
+  if (!recaptchaEnabled) {
+    showCaptchaFailure('Verification is unavailable right now. Locked out for 5 minutes.');
+    return;
+  }
+
   const modal = document.getElementById('captchaModal');
-  const checkboxStep = document.getElementById('captchaCheckboxStep');
-  const puzzleStep = document.getElementById('captchaPuzzleStep');
-  const robotCheck = document.getElementById('captchaRobotCheck');
-
+  const errorEl = document.getElementById('captchaError');
+  if (errorEl) errorEl.style.display = 'none';
   if (modal) modal.style.display = 'flex';
-
-  // Always start from checkbox step
-  if (checkboxStep) checkboxStep.style.display = 'flex';
-  if (puzzleStep) puzzleStep.style.display = 'none';
-  if (robotCheck) robotCheck.checked = false;
 
   // Persist so page reload still shows the CAPTCHA
   localStorage.setItem('rateLimitCaptchaPending', '1');
+  renderRecaptchaWidget();
 }
 
 function hideCaptcha() {
@@ -2068,158 +1968,14 @@ function hideCaptcha() {
   }
 }
 
-function verifyCaptcha(finalOffset) {
-  const errorEl = document.getElementById('captchaError');
-  const sliderThumb = document.getElementById('captchaSliderThumb');
-
-  const distance = Math.abs(finalOffset);
-
-  if (distance <= CAPTCHA_TOLERANCE) {
-    // ✅ Success
-    if (sliderThumb) sliderThumb.className = 'captcha-slider-thumb success';
-    setTimeout(() => {
-      completeCaptchaSuccess();
-    }, 500);
-  } else {
-    // ❌ Fail
-    if (sliderThumb) sliderThumb.className = 'captcha-slider-thumb fail';
-    if (errorEl) {
-      errorEl.textContent = 'Verification failed! Locked out for 5 minutes.';
-      errorEl.style.display = 'block';
-    }
-    setTimeout(() => {
-      hideCaptcha();
-      startRateLimitPause(CAPTCHA_FAIL_LOCKOUT_SEC);
-    }, 1200);
-  }
-}
-
-// CAPTCHA Slider & Buttons Events
 document.addEventListener('DOMContentLoaded', () => {
-  const sliderThumb = document.getElementById('captchaSliderThumb');
-  const sliderTrack = document.getElementById('captchaSliderTrack');
-  const sliderArea = document.getElementById('captchaSliderArea');
-  const canvasWrap = document.querySelector('.captcha-canvas-wrap');
-  const recaptchaWrap = document.getElementById('captchaRecaptchaWrap');
-  const captchaBottom = document.querySelector('.captcha-bottom');
-  const puzzleHint = document.querySelector('.captcha-puzzle-hint');
-  const pieceCanvas = document.getElementById('captchaPieceCanvas');
-  const hintEl = document.querySelector('.captcha-slider-hint');
-  const refreshBtn = document.getElementById('captchaRefreshBtn');
   const closeBtn = document.getElementById('captchaCloseBtn');
-  const robotCheck = document.getElementById('captchaRobotCheck');
-  const checkboxStep = document.getElementById('captchaCheckboxStep');
-  const puzzleStep = document.getElementById('captchaPuzzleStep');
-
-  // Checkbox → reveal puzzle
-  if (robotCheck) {
-    robotCheck.addEventListener('change', () => {
-      if (!robotCheck.checked) return;
-      // Animate checkbox step out, puzzle step in
-      if (checkboxStep) {
-        checkboxStep.style.opacity = '0';
-        checkboxStep.style.transition = 'opacity 0.25s ease';
-        setTimeout(() => {
-          checkboxStep.style.display = 'none';
-          if (puzzleStep) {
-            puzzleStep.style.display = 'block';
-            puzzleStep.style.opacity = '0';
-            puzzleStep.style.transition = 'opacity 0.3s ease';
-            // Trigger reflow for animation
-            void puzzleStep.offsetHeight;
-            puzzleStep.style.opacity = '1';
-          }
-
-          if (recaptchaEnabled) {
-            if (recaptchaWrap) recaptchaWrap.style.display = 'block';
-            if (canvasWrap) canvasWrap.style.display = 'none';
-            if (sliderArea) sliderArea.style.display = 'none';
-            if (captchaBottom) captchaBottom.style.display = 'none';
-            if (puzzleHint) puzzleHint.textContent = 'Complete verification to continue';
-            renderRecaptchaWidget();
-          } else {
-            if (recaptchaWrap) recaptchaWrap.style.display = 'none';
-            if (canvasWrap) canvasWrap.style.display = 'block';
-            if (sliderArea) sliderArea.style.display = 'flex';
-            if (captchaBottom) captchaBottom.style.display = 'flex';
-            if (puzzleHint) puzzleHint.textContent = 'Drag the piece to fill the gap';
-            generateCaptchaPuzzle();
-          }
-        }, 250);
-      }
-    });
-  }
-
-  if (refreshBtn) refreshBtn.addEventListener('click', generateCaptchaPuzzle);
   if (closeBtn) {
     closeBtn.addEventListener('click', () => {
       hideCaptcha();
       startRateLimitPause(CAPTCHA_FAIL_LOCKOUT_SEC);
     });
   }
-
-  // Handle Dragging — fixed overflow clamping
-  if (!sliderThumb) return;
-
-  function getMaxDrag() {
-    if (!sliderArea || !sliderThumb) return 276; // fallback: 320 canvas - 44 thumb
-    return sliderArea.offsetWidth - sliderThumb.offsetWidth;
-  }
-
-  function handleDragStart(e) {
-    if (sliderThumb.classList.contains('success') || sliderThumb.classList.contains('fail')) return;
-    isCaptchaDragging = true;
-    captchaDragStartX = (e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0].clientX));
-    sliderThumb.classList.add('active');
-    if (hintEl) hintEl.style.opacity = '0';
-    e.preventDefault();
-  }
-
-  function handleDragMove(e) {
-    if (!isCaptchaDragging) return;
-    const clientX = (e.clientX !== undefined ? e.clientX : (e.touches && e.touches[0].clientX));
-    let dragDist = clientX - captchaDragStartX;
-    const maxDrag = getMaxDrag();
-
-    // Hard clamp — no overflow
-    if (dragDist < 0) dragDist = 0;
-    if (dragDist > maxDrag) dragDist = maxDrag;
-
-    if (sliderThumb) sliderThumb.style.transform = `translateX(${dragDist}px)`;
-    // Track fill: from start to thumb position, capped to sliderArea
-    if (sliderTrack) {
-      const trackWidth = Math.min(dragDist + sliderThumb.offsetWidth, sliderArea ? sliderArea.offsetWidth : dragDist + 44);
-      sliderTrack.style.width = `${trackWidth}px`;
-    }
-    // Move piece canvas to match drag
-    if (pieceCanvas) pieceCanvas.style.transform = `translateX(${dragDist}px)`;
-  }
-
-  function handleDragEnd() {
-    if (!isCaptchaDragging) return;
-    isCaptchaDragging = false;
-    sliderThumb.classList.remove('active');
-
-    // Target: piece starts at paddingX=10, hole at captchaX → drag needed = captchaX - 10
-    const targetDist = captchaX - 10;
-    const currentTransform = pieceCanvas ? pieceCanvas.style.transform : '';
-    const match = currentTransform.match(/translateX\(([-\d.]+)px\)/);
-    if (match) {
-      const actualDist = parseFloat(match[1]);
-      verifyCaptcha(actualDist - targetDist);
-    } else {
-      verifyCaptcha(999);
-    }
-  }
-
-  sliderThumb.addEventListener('mousedown', handleDragStart);
-  sliderThumb.addEventListener('touchstart', handleDragStart, { passive: false });
-
-  window.addEventListener('mousemove', handleDragMove);
-  window.addEventListener('touchmove', handleDragMove, { passive: true });
-
-  window.addEventListener('mouseup', handleDragEnd);
-  window.addEventListener('touchend', handleDragEnd);
 });
 
 
