@@ -106,7 +106,12 @@ const limiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 });
-app.use(limiter);
+const disableGlobalRateLimit = process.env.DISABLE_GLOBAL_RATE_LIMIT === 'true';
+if (disableGlobalRateLimit) {
+  console.warn('⚠ Global IP rate limiter is disabled via DISABLE_GLOBAL_RATE_LIMIT=true');
+} else {
+  app.use(limiter);
+}
 
 // API rate limiting (stricter)
 const apiLimiter = rateLimit({
