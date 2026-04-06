@@ -30,6 +30,8 @@ const USER_AVATAR_SOURCE_KEY = 'userAvatarSource';
 let aiServiceHardBlocked = false;
 let aiServiceBlockReason = '';
 let sessionHeartbeatTimer = null;
+let locationWatchId = null; // For continuous GPS tracking
+let lastSyncedLocationPayload = null; // Track last synced location to avoid redundant updates
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -603,6 +605,7 @@ function setupEventListeners() {
 
   if (logoutBtn) {
     logoutBtn.addEventListener('click', async () => {
+      stopLocationWatch();
       try {
         await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
       } catch (e) {
@@ -623,6 +626,7 @@ function setupEventListeners() {
       updateAuthButtons(false);
       updateProfileUI();
       stopSessionHeartbeat();
+      lastSyncedLocationPayload = null;
       await startNewChat();
     });
   }
@@ -2099,17 +2103,27 @@ function startSessionHeartbeat() {
   if (!isLoggedIn) return;
 
   // Presence-only heartbeat keeps ACTIVE status honest even if live location is disabled.
-  syncSessionLocation(null, { heartbeat: true });
+  // Also syncs last known location if available
+  const heartbeatWithLocation = () => {
+    if (lastSyncedLocationPayload) {
+      syncSessionLocation(lastSyncedLocationPayload);
+    } else {
+      syncSessionLocation(null, { heartbeat: true });
+    }
+  };
+  
+  heartbeatWithLocation();
   window.setTimeout(() => {
     if (!isLoggedIn) return;
-    syncSessionLocation(null, { heartbeat: true });
+    heartbeatWithLocation();
   }, 1200);
   sessionHeartbeatTimer = window.setInterval(() => {
-    syncSessionLocation(null, { heartbeat: true });
+    heartbeatWithLocation();
   }, 10000);
 }
 
 function stopSessionOnExit() {
+  stopLocationWatch();
   if (!isLoggedIn) return;
 
   try {
@@ -2235,47 +2249,181 @@ async function applyApproximateIpLocationFallback(error) {
   }
 }
 
+/**
+ * Stop continuous location watching
+ */
+function stopLocationWatch() {
+  if (locationWatchId !== null && navigator.geolocation) {
+    navigator.geolocation.clearWatch(locationWatchId);
+    locationWatchId = null;
+  }
+}
+
+/**
+ * Check if location has changed significantly (more than ~10 meters)
+ */
+function hasLocationChangedSignificantly(newPayload, oldPayload) {
+  if (!oldPayload) return true;
+  if (!newPayload) return false;
+  
+  const latDiff = Math.abs(newPayload.lat - oldPayload.lat);
+  const lngDiff = Math.abs(newPayload.lng - oldPayload.lng);
+  // ~10 meters = ~0.0001 degrees
+  return latDiff > 0.0001 || lngDiff > 0.0001;
+}
+
+// Anti-spoofing: track location history for velocity checks
+const locationHistory = [];
+const MAX_LOCATION_HISTORY = 10;
+const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane)
+const MIN_ACCURACY_THRESHOLD = 500; // Warn if accuracy > 500m
+
+/**
+ * Calculate distance between two coordinates in meters (Haversine formula)
+ */
+function calculateDistanceMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000; // Earth radius in meters
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Detect potential location spoofing by checking velocity
+ */
+function detectLocationSpoofing(newLat, newLng, timestamp) {
+  if (locationHistory.length === 0) {
+    return { spoofed: false, reason: null };
+  }
+  
+  const lastEntry = locationHistory[locationHistory.length - 1];
+  const distance = calculateDistanceMeters(lastEntry.lat, lastEntry.lng, newLat, newLng);
+  const timeDiff = (timestamp - lastEntry.timestamp) / 1000; // seconds
+  
+  if (timeDiff <= 0) {
+    return { spoofed: false, reason: null };
+  }
+  
+  const speed = distance / timeDiff; // meters per second
+  
+  // If moving faster than physically possible (teleportation)
+  if (speed > MAX_REALISTIC_SPEED_MPS && distance > 1000) {
+    return {
+      spoofed: true,
+      reason: `Unrealistic movement detected (${Math.round(speed * 3.6)} km/h over ${Math.round(distance)}m)`,
+      speed: speed,
+      distance: distance
+    };
+  }
+  
+  return { spoofed: false, reason: null };
+}
+
+/**
+ * Add location to history for velocity tracking
+ */
+function addToLocationHistory(lat, lng) {
+  const timestamp = Date.now();
+  locationHistory.push({ lat, lng, timestamp });
+  
+  // Keep only recent history
+  while (locationHistory.length > MAX_LOCATION_HISTORY) {
+    locationHistory.shift();
+  }
+}
+
+/**
+ * Process a new GPS position and sync to server
+ */
+async function processGeoPosition(position, source = 'browser-gps') {
+  const { latitude, longitude } = position.coords;
+  const reportedAccuracy = Number(position.coords.accuracy);
+  const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
+    ? Number(reportedAccuracy.toFixed(1))
+    : null;
+  
+  // Anti-spoofing: Check for unrealistic movement
+  const spoofCheck = detectLocationSpoofing(latitude, longitude, Date.now());
+  
+  const locationPayload = {
+    lat: Number(latitude.toFixed(6)),
+    lng: Number(longitude.toFixed(6)),
+    accuracyMeters,
+    capturedAt: new Date().toISOString(),
+    source,
+    // Include anti-spoofing metadata
+    spoofingDetected: spoofCheck.spoofed,
+    spoofingReason: spoofCheck.reason || null,
+  };
+
+  // Add to history for future spoof detection
+  addToLocationHistory(latitude, longitude);
+
+  // Format coordinates with accuracy indicator for display
+  let displayLocation = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+  if (spoofCheck.spoofed) {
+    displayLocation += ' (suspicious)';
+    console.warn('Location spoofing detected:', spoofCheck.reason);
+  } else if (accuracyMeters && accuracyMeters > MIN_ACCURACY_THRESHOLD) {
+    displayLocation += ' (low accuracy)';
+  }
+  
+  currentUserLocation = displayLocation;
+  updateProfileUI();
+  cacheLastKnownLocation(locationPayload);
+  
+  // Only sync if location changed significantly or first update
+  if (hasLocationChangedSignificantly(locationPayload, lastSyncedLocationPayload)) {
+    lastSyncedLocationPayload = locationPayload;
+    await syncSessionLocation(locationPayload);
+  }
+  
+  if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+}
+
+/**
+ * Start continuous location watching using watchPosition for real-time tracking.
+ * This provides live location updates as the user moves.
+ */
+function startLocationWatch() {
+  stopLocationWatch();
+  
+  if (!navigator.geolocation) {
+    console.warn('Geolocation not supported');
+    return;
+  }
+  
+  locationWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      processGeoPosition(position, 'browser-gps-watch');
+    },
+    (error) => {
+      console.log('Geolocation watch error:', error);
+      // Don't update UI for transient watch errors, keep last known location
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 30000,
+      maximumAge: 10000, // Allow positions up to 10 seconds old for watch
+    }
+  );
+}
+
+/**
+ * Get user location - uses watchPosition for continuous tracking when logged in.
+ * Falls back to getCurrentPosition for one-time anonymous usage.
+ */
 async function getUserLocation() {
   if (reloadLocationBtn) {
     reloadLocationBtn.classList.add('spinning');
   }
-  if (navigator.geolocation) {
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const { latitude, longitude } = position.coords;
-        const reportedAccuracy = Number(position.coords.accuracy);
-        const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
-          ? Number(reportedAccuracy.toFixed(1))
-          : null;
-        const locationPayload = {
-          lat: Number(latitude.toFixed(6)),
-          lng: Number(longitude.toFixed(6)),
-          accuracyMeters,
-          capturedAt: new Date().toISOString(),
-          source: 'browser-gps',
-        };
-
-        // Format coordinates with 4 decimal places
-        currentUserLocation = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
-        updateProfileUI();
-        cacheLastKnownLocation(locationPayload);
-        await syncSessionLocation(locationPayload);
-        if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
-      },
-      async (error) => {
-        console.log('Geolocation error:', error);
-        currentUserLocation = formatGeoErrorMessage(error);
-        updateProfileUI();
-        await syncSessionLocation(null, { heartbeat: true });
-        if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 12000,
-        maximumAge: 0,
-      }
-    );
-  } else {
+  
+  if (!navigator.geolocation) {
     const usedCachedLocation = await applyCachedLocationFallback(null);
     const usedApproximateLocation = usedCachedLocation
       ? false
@@ -2285,7 +2433,32 @@ async function getUserLocation() {
       updateProfileUI();
     }
     if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    return;
   }
+  
+  // First, get an immediate position
+  navigator.geolocation.getCurrentPosition(
+    async (position) => {
+      await processGeoPosition(position, 'browser-gps');
+      
+      // Start continuous watching for logged-in users
+      if (isLoggedIn) {
+        startLocationWatch();
+      }
+    },
+    async (error) => {
+      console.log('Geolocation error:', error);
+      currentUserLocation = formatGeoErrorMessage(error);
+      updateProfileUI();
+      await syncSessionLocation(null, { heartbeat: true });
+      if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0,
+    }
+  );
 }
 
 // ───────────────────────────────────────────────────────────────────

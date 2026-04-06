@@ -2405,3 +2405,81 @@ body.admin-exit {
     right: auto;
   }
 }
+
+/* ─────────────────────────────────────────────────────────────────
+   LOCATION SPOOFING WARNING STYLES
+   ───────────────────────────────────────────────────────────────── */
+
+/* Spoofed pin marker styles */
+.fieldman-pin-wrap.is-spoofed .fieldman-pin-body {
+  --pin-border: #ff6b6b;
+  --pin-fill: #4a1919;
+}
+
+.fieldman-pin-wrap.is-spoofed .fieldman-pin-shape {
+  animation: spoofPulse 1.5s ease-in-out infinite;
+}
+
+.fieldman-pin-spoof-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  font-size: 12px;
+  z-index: 10;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
+@keyframes spoofPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 8px rgba(255, 107, 107, 0);
+  }
+}
+
+/* Spoofed row in list */
+.fieldman-row.spoofing-detected {
+  border-left: 3px solid #ff6b6b;
+  background: rgba(255, 107, 107, 0.08);
+}
+
+.fieldman-row.spoofing-detected::before {
+  content: "⚠️";
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Spoofed chip style */
+.fieldman-chip.is-spoofed {
+  background-color: #ff6b6b !important;
+  color: white !important;
+  font-weight: 600;
+  animation: spoofBadgePulse 2s ease-in-out infinite;
+}
+
+@keyframes spoofBadgePulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
+}
+
+/* Popup spoofing warning */
+.fieldman-popup .spoof-warning {
+  color: #ff6b6b;
+  font-weight: bold;
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 107, 107, 0.3);
+}
+
+/* Low accuracy warning */
+.fieldman-popup .accuracy-warning {
+  color: #ffa500;
+  margin-top: 2px;
+}

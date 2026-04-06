@@ -698,7 +698,7 @@ function calculateDisplayCoordinates(items) {
   return points;
 }
 
-function getFieldmanMarkerIcon(nameValue, roleValue, statusValue, avatarUrlValue = null) {
+function getFieldmanMarkerIcon(nameValue, roleValue, statusValue, avatarUrlValue = null, spoofingDetected = false) {
   const role = String(roleValue || 'fieldman').toLowerCase() === 'admin' ? 'admin' : 'fieldman';
   const status = String(statusValue || 'offline').toLowerCase();
   const visual = getMarkerVisualByZoom(fieldmanMapInstance ? fieldmanMapInstance.getZoom() : 6);
@@ -708,8 +708,9 @@ function getFieldmanMarkerIcon(nameValue, roleValue, statusValue, avatarUrlValue
   const avatarNode = avatarUrl
     ? `<img class="fieldman-pin-avatar" src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(String(nameValue || 'User'))}" loading="lazy" />`
     : `<span class="fieldman-pin-initial">${initial}</span>`;
+  const spoofWarning = spoofingDetected ? '<span class="fieldman-pin-spoof-badge">⚠️</span>' : '';
   return window.L.divIcon({
-    className: `fieldman-pin-wrap role-${role} is-${status}${avatarUrl ? ' has-avatar' : ''}`,
+    className: `fieldman-pin-wrap role-${role} is-${status}${avatarUrl ? ' has-avatar' : ''}${spoofingDetected ? ' is-spoofed' : ''}`,
     html: `
       <span
         class="fieldman-pin-body"
@@ -718,6 +719,7 @@ function getFieldmanMarkerIcon(nameValue, roleValue, statusValue, avatarUrlValue
         <span class="fieldman-pin-shape">
           ${avatarNode}
         </span>
+        ${spoofWarning}
       </span>
     `,
     iconSize: [visual.pinSize, visual.pinSize],
@@ -744,7 +746,7 @@ function refreshFieldmanMarkerIconsForZoom() {
   );
 
   markerEntries.forEach((entry, index) => {
-    entry.layer.setIcon(getFieldmanMarkerIcon(entry.meta.name, entry.meta.role, entry.meta.status, entry.meta.avatarUrl));
+    entry.layer.setIcon(getFieldmanMarkerIcon(entry.meta.name, entry.meta.role, entry.meta.status, entry.meta.avatarUrl, entry.meta.spoofingDetected));
     if (displayPoints[index] && typeof entry.layer.setLatLng === 'function') {
       entry.layer.setLatLng([displayPoints[index].lat, displayPoints[index].lng]);
     }
@@ -816,8 +818,9 @@ function renderFieldmanLocations(items, summary) {
           : String(item.freshnessStatus || 'offline').toLowerCase();
       const role = String(item.role || 'fieldman').toLowerCase() === 'admin' ? 'admin' : 'fieldman';
       const avatarUrl = normalizeAvatarUrl(item.avatarUrl);
+      const spoofingDetected = Boolean(item.spoofingDetected);
       const marker = window.L.marker([displayLat, displayLng], {
-        icon: getFieldmanMarkerIcon(item.name || 'Unknown User', role, status, avatarUrl),
+        icon: getFieldmanMarkerIcon(item.name || 'Unknown User', role, status, avatarUrl, spoofingDetected),
       });
       marker.__fieldmanMeta = {
         name: item.name || 'Unknown User',
@@ -826,12 +829,19 @@ function renderFieldmanLocations(items, summary) {
         avatarUrl,
         rawLat: lat,
         rawLng: lng,
+        spoofingDetected,
       };
 
       const popupTitle = escapeHtml(item.name || 'Unknown Fieldman');
       const popupRole = escapeHtml((item.role || 'fieldman').toUpperCase());
       const popupStatus = escapeHtml(getStatusLabel(status));
       const popupAddress = String(item.address || '').trim() || 'Address unavailable';
+      const spoofingWarning = item.spoofingDetected
+        ? `<br /><span style="color: #ff6b6b; font-weight: bold;">⚠️ SUSPICIOUS LOCATION</span>`
+        : '';
+      const accuracyWarning = item.accuracyMeters && item.accuracyMeters > 500
+        ? `<br /><span style="color: #ffa500;">⚠️ Low accuracy: ${item.accuracyMeters.toFixed(0)}m</span>`
+        : '';
 
       marker.bindPopup(`
         <div class="fieldman-popup">
@@ -840,6 +850,8 @@ function renderFieldmanLocations(items, summary) {
           <span>Status: ${popupStatus}</span><br />
           <span>Address: ${escapeHtml(popupAddress)}</span><br />
           <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
+          ${spoofingWarning}
+          ${accuracyWarning}
         </div>
       `);
 
@@ -869,9 +881,12 @@ function renderFieldmanLocations(items, summary) {
           ? `${lat.toFixed(4)}, ${lng.toFixed(4)}`
           : 'No coordinates';
         const accuracyText = Number.isFinite(accuracy) ? `${accuracy.toFixed(1)}m` : 'n/a';
+        const spoofingAlert = item.spoofingDetected
+          ? '<span class="fieldman-chip is-spoofed" style="background-color: #ff6b6b; color: white;">⚠️ SUSPICIOUS</span>'
+          : '';
 
         return `
-          <article class="fieldman-row">
+          <article class="fieldman-row${item.spoofingDetected ? ' spoofing-detected' : ''}">
             <div class="fieldman-row-main">
               <h4>${name}</h4>
               <p>${escapeHtml(locationText)}</p>
@@ -879,6 +894,7 @@ function renderFieldmanLocations(items, summary) {
             <div class="fieldman-row-meta">
               <span class="fieldman-role-chip role-${role}">${role.toUpperCase()}</span>
               <span class="fieldman-chip is-${escapeHtml(status)}">${getStatusLabel(status)}</span>
+              ${spoofingAlert}
               <span>Accuracy: ${escapeHtml(accuracyText)}</span>
               <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
             </div>

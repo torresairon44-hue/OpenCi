@@ -54,6 +54,9 @@ interface ParsedSessionLocation {
   capturedAt: string;
   source: string;
   address: string | null;
+  spoofingDetected?: boolean;
+  spoofingReason?: string | null;
+  confidence?: number;
 }
 
 type FreshnessStatus = 'live' | 'stale' | 'offline';
@@ -201,6 +204,9 @@ interface FieldmanLocationItem {
   address: string | null;
   accessStatus: AccessStatus;
   freshnessStatus: FreshnessStatus;
+  spoofingDetected?: boolean;
+  spoofingReason?: string | null;
+  confidence?: number;
 }
 
 function toLocationSnapshot(item: FieldmanLocationItem, generatedAt: string): LocationSnapshot {
@@ -353,6 +359,9 @@ async function buildFieldmanLocationsPayload(): Promise<FieldmanLocationsPayload
         address: location.address,
         accessStatus,
         freshnessStatus,
+        spoofingDetected: location.spoofingDetected || false,
+        spoofingReason: location.spoofingReason || null,
+        confidence: location.confidence ?? 1.0,
       };
     })
     .filter((item): item is FieldmanLocationItem => item !== null);
@@ -431,6 +440,9 @@ function parseSessionLocation(rawLocation: string | null, updatedAt: string | nu
   let capturedAt = updatedAt || new Date().toISOString();
   let source = 'unknown';
   let address: string | null = null;
+  let spoofingDetected = false;
+  let spoofingReason: string | null = null;
+  let confidence = 1.0;
 
   try {
     const parsed = JSON.parse(sanitized);
@@ -458,6 +470,17 @@ function parseSessionLocation(rawLocation: string | null, updatedAt: string | nu
       if (typeof (parsed as any).address === 'string' && (parsed as any).address.trim().length > 0) {
         address = (parsed as any).address.trim().slice(0, 260);
       }
+
+      // Parse spoofing detection data
+      if (typeof (parsed as any).spoofingDetected === 'boolean') {
+        spoofingDetected = (parsed as any).spoofingDetected;
+      }
+      if (typeof (parsed as any).spoofingReason === 'string') {
+        spoofingReason = (parsed as any).spoofingReason;
+      }
+      if (typeof (parsed as any).confidence === 'number' && Number.isFinite((parsed as any).confidence)) {
+        confidence = Math.max(0, Math.min(1, (parsed as any).confidence));
+      }
     }
   } catch {
     const match = sanitized.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
@@ -483,6 +506,9 @@ function parseSessionLocation(rawLocation: string | null, updatedAt: string | nu
     capturedAt,
     source,
     address,
+    spoofingDetected,
+    spoofingReason,
+    confidence,
   };
 }
 
