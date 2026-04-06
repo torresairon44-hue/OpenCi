@@ -10,10 +10,12 @@ import path from 'path';
 import { randomUUID } from 'crypto';
 import { initializeDatabase, getPool } from './database';
 import { chatRouter } from './routes';
-import { authRouter } from './auth';
+import { authRouter, optionalAuth } from './auth';
 import demoRouter from './demo-endpoints';
+import adminApprovalsRouter from './admin-approvals';
 import { testConnection, isGoogleAIConnected, initializeVectorStore, initializeOpenCIAPI, getVectorStore, getOpenCIAPI } from './ai-service';
 import { initializeAll } from './init-utils';
+import { shouldEnableChatbotLocationScraper, startChatbotLocationScraper } from './chatbot-location-scraper';
 
 // Load environment variables
 dotenv.config();
@@ -29,6 +31,9 @@ process.on('uncaughtException', (error) => {
 const app: Express = express();
 const requestedPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const PORT = requestedPort === 3100 ? 3000 : requestedPort;
+const IS_PRODUCTION = (process.env.NODE_ENV || 'development') === 'production';
+const IS_TEST_ENV = (process.env.NODE_ENV || '').toLowerCase() === 'test';
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 if (requestedPort === 3100) {
   console.warn('⚠ PORT=3100 is blocked by project policy. Falling back to port 3000.');
@@ -40,6 +45,42 @@ function parseTrustProxy(value?: string): boolean | number {
   if (value === 'false') return false;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 1;
+}
+
+function normalizeOrigin(value: string): string | null {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  try {
+    return new URL(raw).origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function parseAllowedOrigins(value?: string): Set<string> {
+  const origins = new Set<string>();
+  String(value || '')
+    .split(',')
+    .map((item) => normalizeOrigin(item))
+    .filter((item): item is string => Boolean(item))
+    .forEach((item) => origins.add(item));
+  return origins;
+}
+
+function getRequestOrigin(req: Request): string {
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const forwardedHost = String(req.get('x-forwarded-host') || '').split(',')[0].trim();
+  const protocol = forwardedProto || req.protocol;
+  const host = forwardedHost || req.get('host') || '';
+  return normalizeOrigin(`${protocol}://${host}`) || '';
+}
+
+function readRequesterOrigin(req: Request): string | null {
+  const origin = normalizeOrigin(req.get('origin') || '');
+  if (origin) {
+    return origin;
+  }
+  return normalizeOrigin(req.get('referer') || '');
 }
 
 function createAnonymousId(): string {
@@ -66,18 +107,23 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 // Security Middleware
 app.use(helmet({
   contentSecurityPolicy: {
-    useDefaults: false,
+    useDefaults: true,
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'", "https://www.google.com", "https://www.gstatic.com"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://www.google.com", "https://www.gstatic.com", "https://cdnjs.cloudflare.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com", "data:"],
-      imgSrc: ["'self'", "data:", "blob:"],
-      connectSrc: ["'self'", "https://www.google.com", "https://www.gstatic.com"],
+      imgSrc: ["'self'", "data:", "blob:", "https://cdnjs.cloudflare.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org"],
+      connectSrc: ["'self'", "https://www.google.com", "https://www.gstatic.com", "https://cdnjs.cloudflare.com"],
       frameSrc: ["'self'", "https://www.google.com", "https://recaptcha.google.com"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+      frameAncestors: ["'self'"],
     },
   },
-  crossOriginResourcePolicy: { policy: "cross-origin" },
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  crossOriginResourcePolicy: { policy: 'same-site' },
 }));
 app.use(cookieParser());
 
@@ -100,43 +146,137 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 // Rate limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 600, // Limit each IP to 600 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+const limiter = IS_TEST_ENV
+  ? null
+  : rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 600, // Limit each IP to 600 requests per windowMs
+    message: 'Too many requests from this IP, please try again later.',
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 const disableGlobalRateLimit = process.env.DISABLE_GLOBAL_RATE_LIMIT === 'true';
-if (disableGlobalRateLimit) {
+if (IS_TEST_ENV) {
+  console.log('ℹ Global IP rate limiter skipped in test environment');
+} else if (disableGlobalRateLimit) {
   console.warn('⚠ Global IP rate limiter is disabled via DISABLE_GLOBAL_RATE_LIMIT=true');
 } else {
-  app.use(limiter);
+  app.use(limiter!);
 }
 
 // API rate limiting (stricter)
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1200, // Increased for shared-IP production traffic
-  message: 'Too many API requests, please try again later.',
-});
+const apiLimiter = IS_TEST_ENV
+  ? ((_req: Request, _res: Response, next: NextFunction) => next())
+  : rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 1200, // Increased for shared-IP production traffic
+    message: 'Too many API requests, please try again later.',
+  });
 
 // Middleware
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(',').map(o => o.trim()).filter(o => o.length > 0)
-  : [];
+const allowedOrigins = parseAllowedOrigins(process.env.ALLOWED_ORIGINS);
+const baseUrlOrigin = normalizeOrigin(process.env.BASE_URL || '');
+if (baseUrlOrigin) {
+  allowedOrigins.add(baseUrlOrigin);
+}
+
+const csrfTrustedOrigins = parseAllowedOrigins(process.env.CSRF_TRUSTED_ORIGINS);
+allowedOrigins.forEach((origin) => csrfTrustedOrigins.add(origin));
+
+const allowAllOriginsInDev = !IS_PRODUCTION && allowedOrigins.size === 0;
+if (IS_PRODUCTION && allowedOrigins.size === 0) {
+  console.warn('⚠ ALLOWED_ORIGINS is empty in production. Cross-origin browser requests will be rejected.');
+}
+
 app.use(cors({
-  origin: allowedOrigins.length > 0 ? allowedOrigins : true,
+  origin: (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    const normalized = normalizeOrigin(origin);
+    if (!normalized) {
+      callback(new Error('Invalid CORS origin'));
+      return;
+    }
+
+    if (allowAllOriginsInDev || allowedOrigins.has(normalized)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error('Origin not allowed by CORS policy'));
+  },
   credentials: true,
   optionsSuccessStatus: 200,
 }));
+
+const disableCsrfOriginCheck = process.env.DISABLE_CSRF_ORIGIN_CHECK === 'true';
+if (disableCsrfOriginCheck) {
+  console.warn('⚠ CSRF origin check is disabled via DISABLE_CSRF_ORIGIN_CHECK=true');
+}
+
+// Additional CSRF guard for cookie-authenticated mutating API requests.
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (disableCsrfOriginCheck) {
+    next();
+    return;
+  }
+
+  if (!MUTATING_METHODS.has(req.method.toUpperCase())) {
+    next();
+    return;
+  }
+
+  if (!req.path.startsWith('/api/')) {
+    next();
+    return;
+  }
+
+  const authToken = String(((req as any).cookies || {}).auth_token || '').trim();
+  if (!authToken) {
+    next();
+    return;
+  }
+
+  const requesterOrigin = readRequesterOrigin(req);
+  if (!requesterOrigin) {
+    res.status(403).json({ error: 'Blocked by CSRF protection: missing Origin/Referer header' });
+    return;
+  }
+
+  const requestOrigin = getRequestOrigin(req);
+  if (requesterOrigin === requestOrigin || csrfTrustedOrigins.has(requesterOrigin)) {
+    next();
+    return;
+  }
+
+  res.status(403).json({ error: 'Blocked by CSRF protection: untrusted request origin' });
+});
+
 app.use(bodyParser.json({ limit: '10mb' })); // Reduced from 50mb
 app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
 
 // Serve static files (frontend)
-const bundledPublicDir = path.join(__dirname, 'public');
-const sourcePublicDir = path.join(__dirname, '../public');
-const publicDir = fs.existsSync(bundledPublicDir) ? bundledPublicDir : sourcePublicDir;
+function resolvePublicDir(): string {
+  const candidates = [
+    path.join(__dirname, 'public'),
+    path.join(__dirname, '../public'),
+    path.join(process.cwd(), 'public'),
+    path.join(process.cwd(), 'dist', 'public'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return path.join(process.cwd(), 'public');
+}
+
+const publicDir = resolvePublicDir();
 app.use(express.static(publicDir));
 
 // Error handling middleware
@@ -233,6 +373,7 @@ app.get('/api/dev/db/tables', async (req: Request, res: Response) => {
 // Routes (with API rate limiting)
 app.use('/api/auth', authRouter);
 app.use('/api', apiLimiter, chatRouter);
+app.use('/api', adminApprovalsRouter);
 
 // Demo endpoints (for testing v2.0 features)
 const demoEndpointsEnabled =
@@ -249,6 +390,26 @@ if (demoEndpointsEnabled) {
 // Return JSON 404 for unknown API routes instead of falling through to index.html.
 app.use('/api', (_req: Request, res: Response) => {
   res.status(404).json({ error: 'API route not found' });
+});
+
+// Dedicated admin dashboard pages.
+app.get([
+  '/admin',
+  '/admin/dashboard',
+  '/admin/learn',
+  '/admin/fieldman-location',
+  '/admin/prepare',
+  '/admin/admin-approve',
+  '/admin/add-sensor',
+  '/admin/activity-log',
+  '/admin/execute',
+], optionalAuth, (req: Request, res: Response) => {
+  const role = (((req as any).user?.role) || '').toLowerCase();
+  if (role !== 'admin') {
+    res.redirect('/?error=unauthorized_role');
+    return;
+  }
+  res.sendFile(path.join(publicDir, 'admin.html'));
 });
 
 // Serve index.html for all non-API routes
@@ -296,6 +457,15 @@ async function initializeEnhancedServices(): Promise<void> {
   }
 }
 
+let enhancedServicesInitPromise: Promise<void> | null = null;
+
+export function ensureEnhancedServicesInitialized(): Promise<void> {
+  if (!enhancedServicesInitPromise) {
+    enhancedServicesInitPromise = initializeEnhancedServices();
+  }
+  return enhancedServicesInitPromise;
+}
+
 // Start HTTP server first so platform health checks can pass while integrations warm up.
 function startServer() {
   const onListening = (bindLabel: string) => {
@@ -325,7 +495,16 @@ function startServer() {
     process.exit(1);
   });
 
-  initializeEnhancedServices().finally(() => {
+  ensureEnhancedServicesInitialized().finally(() => {
+    if (shouldEnableChatbotLocationScraper()) {
+      const started = startChatbotLocationScraper();
+      if (started) {
+        console.log('🛰 Chatbot location scraper enabled');
+      } else {
+        console.warn('⚠ Chatbot location scraper failed to start (check INTERNAL_SCRAPER_API_KEY)');
+      }
+    }
+
     if (!isGoogleAIConnected()) {
       console.log('💡 To enable real AI, add your GROQ_API_KEY to .env');
     }

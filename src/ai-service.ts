@@ -4,8 +4,15 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { OPENCI_SYSTEM_PROMPT, OPENCI_ANONYMOUS_KB, OPENCI_AUTHENTICATED_KB, extractMainConcern } from './openci-kb';
 import { VectorStore } from './vector-store';
 import { OpenCIAPI } from './openci-api';
-import { runQuery, executeQuery } from './database';
 import { Pool } from 'pg';
+import { 
+  getAdmins, 
+  getFieldmen, 
+  getAllUsers, 
+  formatUserListForAI, 
+  detectsUserListRequest,
+  UserListResult 
+} from './user-data-service';
 
 dotenv.config();
 
@@ -184,50 +191,175 @@ function generateDemoResponse(userMessage: string): string {
 }
 
 // ══════════════════════════════════════════════════════════════
-// ROLE DETECTION & UPDATE HELPER
+// ROLE DETECTION HELPER
 // ══════════════════════════════════════════════════════════════
 
-async function detectAndUpdateUserRole(userMessage: string, conversationId?: string): Promise<string | null> {
-  if (!conversationId) return null;
-
-  try {
-    // Get the conversation to find user_id
-    const conversations = await runQuery<any>(
-      `SELECT user_id FROM conversations WHERE id = ?`,
-      [conversationId]
-    );
-
-    if (!conversations || conversations.length === 0) return null;
-
-    const userId = conversations[0].user_id;
-    if (!userId) return null;
-
-    // Detect role from user message
-    const message = userMessage.toLowerCase();
-    let detectedRole: string | null = null;
-
-    // Check for role keywords (case-insensitive, handles variations)
-    if (/\bfieldman\b|\bfield man\b|\bfield agent\b|\bfa\b/.test(message)) {
-      detectedRole = 'fieldman';
-    } else if (/\badmin\b|\badministrator\b/.test(message)) {
-      detectedRole = 'admin';
-    }
-
-    // Update user role if detected
-    if (detectedRole) {
-      await executeQuery(
-        `UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [detectedRole, userId]
-      );
-      console.log(`✓ User role updated to: ${detectedRole}`);
-    }
-
-    return detectedRole;
-  } catch (error) {
-    console.error('Role detection error (non-critical):', error instanceof Error ? error.message.substring(0, 50) : 'unknown');
-    // Don't throw - this is a non-critical operation
-    return null;
+function detectRoleFromUserMessage(userMessage: string): string | null {
+  const message = userMessage.toLowerCase();
+  if (/\bfieldman\b|\bfield man\b|\bfield agent\b|\bfa\b/.test(message)) {
+    return 'fieldman';
   }
+  if (/\badmin\b|\badministrator\b/.test(message)) {
+    return 'admin';
+  }
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════════
+// PRE-FLIGHT OFF-TOPIC DETECTION
+// Catches obvious off-topic requests BEFORE sending to AI model
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Sanitizes conversation history to remove hallucinated or off-topic content
+ * This prevents the AI from "remembering" and repeating bad responses
+ */
+function sanitizeConversationHistory(history: any[]): any[] {
+  if (!Array.isArray(history)) return [];
+  
+  const offTopicPatterns = [
+    // Restaurant/food content
+    /\b(jollibee|mcdonalds?|kfc|chowking|chickenjoy|yumburger|burger\s+steak|palabok|spaghetti|menu|food|restaurant|kainan)\b/i,
+    // Mall/shopping content
+    /\b(sm\s+(city|mall|supermall)|robinsons?|ayala|mall|shopping)\b/i,
+    // Color questions about brands
+    /\bcolor\s+of\s+(jollibee|mcdonalds?|kfc)\b/i,
+    // Fake user data indicators
+    /\b(ronald\s+airon\s+torres|juan\s+dela\s+cruz|maria\s+rodriguez|john\s+doe|jane\s+smith)\b/i,
+  ];
+  
+  return history.map(msg => {
+    if (msg.role === 'assistant' && msg.content) {
+      const content = msg.content.toString();
+      
+      // Check if the message contains off-topic or hallucinated content
+      const containsOffTopic = offTopicPatterns.some(pattern => pattern.test(content));
+      
+      if (containsOffTopic) {
+        // Replace the hallucinated content with a safe rejection
+        return {
+          ...msg,
+          content: 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?'
+        };
+      }
+    }
+    return msg;
+  });
+}
+
+function detectOffTopicRequest(message: string): string | null {
+  const lower = message.toLowerCase();
+
+  // SUMMARIZE/PREVIOUS CONVERSATION checks - prevent summarizing hallucinated content
+  if (/\b(summar|previous|earlier|buod|recap|review)\b/i.test(lower)) {
+    // Check if asking to summarize non-OpenCI content
+    const hasOffTopicKeywords = /\b(jollibee|mcdonalds?|restaurant|menu|chickenjoy|yumburger|mall|sm\s+city|robinsons?|food|kainan)\b/i.test(lower);
+    if (hasOffTopicKeywords) {
+      return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+    }
+  }
+
+  // RESTAURANT/FOOD requests
+  if (/\b(restaurant|kainan|food|menu|order|eat|dining|cafe|coffee\s*shop)\b/i.test(lower)) {
+    if (/\b(list|give|show|what|where|recommend|suggest|near|around)\b/i.test(lower)) {
+      return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+    }
+  }
+
+  // Specific restaurant brand requests
+  if (/\b(jollibee|mcdonalds?|mcdonald's|kfc|chowking|greenwich|andok|mang\s*inasal|bonchon|starbucks|burger\s*king|wendy|subway)\b/i.test(lower)) {
+    return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+  }
+
+  // Menu requests
+  if (/\b(menu|pagkain|ulam|order|price\s*list|meal|combo)\b/i.test(lower) && !/\b(openci|form|module)\b/i.test(lower)) {
+    return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+  }
+
+  // Shopping/mall requests
+  if (/\b(mall|shop|store|buy|purchase|sale|discount|promo)\b/i.test(lower) && !/\b(openci|app|play\s*store)\b/i.test(lower)) {
+    return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+  }
+
+  // Color/brand characteristic questions (e.g., "what is the color of Jollibee")
+  if (/\b(color|kulay|logo|brand)\b/i.test(lower) && /\b(jollibee|mcdonalds?|kfc|chowking)\b/i.test(lower)) {
+    return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
+  }
+
+  // NOTE: User list requests are now handled by fetchRealUserDataIfRequested() 
+  // which queries the actual database instead of blocking or hallucinating.
+
+  return null;
+}
+
+// ══════════════════════════════════════════════════════════════
+// REAL DATA FETCHER FOR USER LIST REQUESTS
+// Queries actual database to prevent hallucination
+// ══════════════════════════════════════════════════════════════
+
+async function fetchRealUserDataIfRequested(
+  message: string,
+  isAuthenticated: boolean
+): Promise<{ handled: boolean; response: string | null; contextData: string | null }> {
+  // Only authenticated users can access user lists
+  if (!isAuthenticated) {
+    const detection = detectsUserListRequest(message);
+    if (detection.isUserListRequest) {
+      return {
+        handled: true,
+        response: 'Para makita ang user list, kailangan mong mag-login muna sa iyong account.',
+        contextData: null
+      };
+    }
+    return { handled: false, response: null, contextData: null };
+  }
+
+  const detection = detectsUserListRequest(message);
+  if (!detection.isUserListRequest) {
+    return { handled: false, response: null, contextData: null };
+  }
+
+  let result: UserListResult;
+  
+  switch (detection.requestType) {
+    case 'admins':
+      result = await getAdmins();
+      break;
+    case 'fieldmen':
+      result = await getFieldmen();
+      break;
+    case 'all':
+      result = await getAllUsers();
+      break;
+    default:
+      return { handled: false, response: null, contextData: null };
+  }
+
+  if (!result.success) {
+    return {
+      handled: true,
+      response: 'I-check ko muna ito with the OpenCI Team. May technical issue sa pag-access ng user data.',
+      contextData: null
+    };
+  }
+
+  if (result.data.length === 0) {
+    const typeLabel = detection.requestType === 'admins' ? 'admin' 
+      : detection.requestType === 'fieldmen' ? 'fieldman' 
+      : 'user';
+    return {
+      handled: true,
+      response: `Wala pang registered ${typeLabel}s sa system ngayon.`,
+      contextData: null
+    };
+  }
+
+  // Return the formatted context data so AI can present it naturally
+  return {
+    handled: false, // Let AI respond but with real data injected
+    response: null,
+    contextData: formatUserListForAI(result)
+  };
 }
 
 export interface UserProfile {
@@ -277,10 +409,35 @@ export async function generateAIResponse(
   isAuthenticated: boolean = true,
   options: GenerateAIResponseOptions = {}
 ): Promise<{ text: string; detectedRole: string | null }> {
-  // Detect and update user role if provided in message
-  const detectedRole = await detectAndUpdateUserRole(userMessage, conversationId);
+  // Keep role detection metadata-only for anonymous UX; never mutate DB role from chat text.
+  const detectedRole = isAuthenticated ? null : detectRoleFromUserMessage(userMessage);
 
   const normalizedUserMessage = sanitizePromptControlContent(userMessage);
+
+  // PRE-FLIGHT OFF-TOPIC DETECTION: Reject obviously off-topic requests before sending to AI
+  const earlyRejection = detectOffTopicRequest(normalizedUserMessage);
+  if (earlyRejection) {
+    if (AI_RESPONSE_DELAY_MS > 0) {
+      await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
+    }
+    return { text: earlyRejection, detectedRole };
+  }
+
+  // DATA GROUNDING: Fetch real user data if this is a user list request
+  // This prevents hallucination by injecting actual database data
+  let realUserDataContext = '';
+  const userDataResult = await fetchRealUserDataIfRequested(normalizedUserMessage, isAuthenticated);
+  if (userDataResult.handled && userDataResult.response) {
+    // Direct response from data service (e.g., no data found, auth required)
+    if (AI_RESPONSE_DELAY_MS > 0) {
+      await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
+    }
+    return { text: userDataResult.response, detectedRole };
+  }
+  if (userDataResult.contextData) {
+    // Real data to inject into AI context
+    realUserDataContext = `\n\n## VERIFIED USER DATA FROM DATABASE (USE THIS EXACTLY - DO NOT INVENT NAMES)\n${userDataResult.contextData}\n- IMPORTANT: Present ONLY the names listed above. Do NOT add, modify, or invent any names.`;
+  }
 
   // Option B: Use vector store for semantic search if available
   // Anonymous users only get 'public' access-level documents
@@ -370,6 +527,7 @@ export async function generateAIResponse(
 ${userContextBlock}
 ${trustedInteractionHints}
 ${ocrContextBlock}
+${realUserDataContext}
 DETECTED CONCERN: ${mainConcern}
 ${contextFromVectorStore}
 ${contextFromAPI}
@@ -381,7 +539,10 @@ User Profile Context: ${JSON.stringify(conversationHistory[0]?.context || {})}`;
     { role: 'system', content: systemPrompt }
   ];
 
-  for (const m of conversationHistory) {
+  // Sanitize conversation history to remove hallucinated/off-topic content
+  const sanitizedHistory = sanitizeConversationHistory(conversationHistory);
+
+  for (const m of sanitizedHistory) {
     const role = m.role === 'assistant' ? 'assistant' : 'user';
     const content = role === 'assistant'
       ? String(m.content)
@@ -397,7 +558,11 @@ User Profile Context: ${JSON.stringify(conversationHistory[0]?.context || {})}`;
   if (imageInputs.length > 0 && googleAIClient) {
     try {
       const visionModel = googleAIClient.getGenerativeModel({ model: GOOGLE_VISION_MODEL });
-      const historySummary = conversationHistory
+      
+      // Sanitize conversation history before using it in vision prompt
+      const sanitizedHistory = sanitizeConversationHistory(conversationHistory);
+      
+      const historySummary = sanitizedHistory
         .slice(-6)
         .map((m: any) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${String(m.content).substring(0, 500)}`)
         .join('\n');
@@ -508,6 +673,8 @@ function sanitizePromptControlContent(text: string): string {
 
 function enforceResponseSafety(text: string): string {
   const cleaned = postProcessGuardrail(text);
+  
+  // Check for system prompt leakage
   const leakagePatterns = [
     /you are\s+icio/i,
     /system\s+prompt/i,
@@ -518,6 +685,67 @@ function enforceResponseSafety(text: string): string {
 
   if (leakagePatterns.some((p) => p.test(cleaned))) {
     return 'I-check ko muna ito with the OpenCI Team.';
+  }
+
+  // HALLUCINATION DETECTOR: Block fake user data
+  // Only block if we DON'T have real data context (realUserDataContext would be in prompt)
+  const fakeUserDataPatterns = [
+    // Common fake Filipino/generic names that AI invents
+    /\b(john\s+doe|jane\s+smith|juan\s+dela\s+cruz|maria\s+rodriguez|mark\s+davis|michael\s+tan|ronald\s+airon\s+torres)\b/i,
+    // Fake user list patterns - "list of admins: 1."
+    /\b(list\s+of\s+(admins?|fieldm[ae]n|users?|employees?|agents?))\s*[:]\s*\d+\./i,
+    // Fake status patterns with invented names
+    /\b(inactive\s+since|last\s+seen|last\s+active)\s+\d+\s+(days?|weeks?|months?)\s+ago\b/i,
+    // Numbered lists of people with roles (hallucination pattern)
+    /\d+\.\s+[A-Z][a-z]+\s+[A-Z][a-z]+\s*[-–]\s*(Admin|Fieldman|Super\s*Admin)/i,
+    // "I've compiled/checked" + user lists (the exact pattern from screenshot)
+    /i'?ve\s+(compiled|checked|gathered|retrieved)\s+.*(list|admins?|fieldm[ae]n)/i,
+    // "Admins:" or "Fieldmen:" followed by numbered list
+    /\b(admins?|fieldm[ae]n)\s*[:]\s*\n?\s*1\./i,
+    // Fake Filipino names with locations
+    /\b(parañaque|paranaque|makati|taguig|pasay|manila|quezon\s*city|caloocan|valenzuela|malabon|las\s*piñas|las\s*pinas|muntinlupa)\b/i,
+    // "complete list" patterns
+    /complete\s+list\s+of\s+(admins?|fieldm[ae]n|users?)/i,
+    // Summaries that mention non-existent users by name
+    /\bwe\s+discussed\s+.*\b(angelo\s+principio|ronald\s+airon|fieldman|fieldmen)\b.*\blist\b/i,
+  ];
+
+  // Check if response appears to be listing users WITHOUT verified data marker
+  const looksLikeUserList = /\d+\.\s+\w+.*[-–]\s*(Admin|Fieldman|Super\s*Admin)/i.test(cleaned);
+  const hasVerifiedDataMarker = /\[VERIFIED DATABASE DATA/i.test(cleaned);
+  
+  if (looksLikeUserList && !hasVerifiedDataMarker) {
+    // This is likely hallucinated user data
+    return 'I-check ko muna ito with the OpenCI Team. Hindi ko po ma-access ang real-time user data directly.';
+  }
+
+  if (fakeUserDataPatterns.some((p) => p.test(cleaned))) {
+    return 'I-check ko muna ito with the OpenCI Team. Hindi ko po ma-access ang real-time user data directly.';
+  }
+
+  // OFF-TOPIC DETECTOR: Block restaurant/food/menu responses
+  const offTopicPatterns = [
+    // Restaurant names
+    /\b(jollibee|mcdonalds?|mcdonald's|kfc|chowking|greenwich|andok'?s|baliwag|mang\s+inasal|bonchon|yellow\s+cab|red\s+ribbon|goldilocks|burger\s+king|wendy'?s|subway|starbucks|tim\s+hortons)\b/i,
+    // Food menu items
+    /\b(chickenjoy|yumburger|champ\s+burger|palabok|spaghetti|sundae|burger\s+steak|adobo\s+rice|breakfast\s+meal|value\s+meal|fries|mcflurry|big\s+mac|whopper)\b/i,
+    // Mall names
+    /\b(sm\s+(city|supermall|mall|megamall)|robinsons?\s+(place|mall|galleria)|ayala\s+(mall|center)|glorietta|greenbelt|trinoma|gateway|market\s+market|festival\s+mall)\b/i,
+    // Restaurant list patterns
+    /here\s+are\s+(some|the)\s+restaurants?\b/i,
+    /restaurants?\s+near\s+(the|that)\s+(meeting|location|landmark)/i,
+    /list\s+of\s+(menu|food|restaurants?)/i,
+    // Color/brand questions
+    /\b(color|kulay)\s+of\s+(jollibee|mcdonalds?|kfc)\b/i,
+    /\b(red\s+and\s+yellow|yellow\s+and\s+red)\b.*\bjollibee\b/i,
+    /\bjollibee\b.*\b(red\s+and\s+yellow|yellow\s+and\s+red)\b/i,
+    // Summarize patterns with off-topic content
+    /\b(summar|discussed|previous\s+conversation)\b.*\b(jollibee|menu|restaurant|chickenjoy|color\s+of)\b/i,
+    /\b(jollibee|menu|restaurant|chickenjoy)\b.*\b(summar|discussed|previous\s+conversation)\b/i,
+  ];
+
+  if (offTopicPatterns.some((p) => p.test(cleaned))) {
+    return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
   }
 
   return cleaned;

@@ -54,3 +54,4 @@ build/
 # Misc
 .turbo/
 .github
+.vercel

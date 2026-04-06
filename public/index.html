@@ -31,7 +31,7 @@
       <!-- Brand Section -->
       <div class="sidebar-brand">
         <div class="brand-logo">
-          <img src="madridai.png" alt="OpenCI Logo" class="logo-img robot-img" id="sidebarMascot"
+          <img src="assets/branding/madridai.png" alt="OpenCI Logo" class="logo-img robot-img" id="sidebarMascot"
             title="Toggle light/dark theme" />
         </div>
         <div class="brand-text">
@@ -72,6 +72,9 @@
               </button>
             </div>
             <div class="profile-value" id="profileLocation">Searching...</div>
+          </div>
+          <div class="profile-item" id="adminDashboardProfileItem" hidden>
+            <a class="admin-dashboard-link" id="adminDashboardProfileLink" href="/admin/dashboard">Dashboard</a>
           </div>
         </div>
       </div>
@@ -138,7 +141,7 @@
         </div>
         <div class="header-actions">
           <button class="btn-auth btn-auth-login" id="loginBtn">
-            <img class="lark-logo" src="lark-logo.png" alt="Lark" width="22" height="22" />
+            <img class="lark-logo" src="assets/branding/lark-logo.png" alt="Lark" width="22" height="22" />
             <span class="btn-auth-text-gradient">Login with Lark</span>
           </button>
           <button class="btn-auth btn-auth-logout" id="logoutBtn" style="display:none;">
@@ -230,9 +233,22 @@
           <h3>User Profile</h3>
           <div class="profile-section">
             <div class="profile-avatar">
-              <i class="fas fa-user-circle"></i>
+              <img id="settingsProfileAvatarImg" class="settings-profile-avatar-img" alt="Profile photo" hidden />
+              <div id="settingsProfileAvatarFallback" class="settings-profile-avatar-fallback">
+                <i class="fas fa-user-circle"></i>
+              </div>
             </div>
             <div class="profile-info">
+              <div class="profile-photo-actions">
+                <input type="file" id="profilePhotoInput" accept="image/png,image/jpeg,image/webp" hidden />
+                <button type="button" class="btn btn-secondary" id="uploadProfilePhotoBtn">
+                  <i class="fas fa-upload"></i> Upload Photo
+                </button>
+                <button type="button" class="btn btn-secondary" id="removeProfilePhotoBtn">
+                  <i class="fas fa-trash"></i> Remove Photo
+                </button>
+                <p class="profile-photo-hint" id="profilePhotoHelpText">Use PNG, JPG, or WEBP. Max file size: 2MB.</p>
+              </div>
               <input type="text" id="userName" class="input-field" placeholder="Your name" value="User" />
               <input type="email" id="userEmail" class="input-field" placeholder="Your email" />
             </div>
@@ -274,6 +290,13 @@
           </button>
           <button class="btn btn-secondary btn-block" id="exportDataBtn">
             <i class="fas fa-download"></i> Export Conversations
+          </button>
+        </div>
+
+        <div class="settings-section">
+          <h3>Access Requests</h3>
+          <button class="btn btn-secondary btn-block" id="requestAdminAccessBtn">
+            <i class="fas fa-user-shield"></i> Request Admin Access
           </button>
         </div>
 

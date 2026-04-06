@@ -26,8 +26,9 @@ const WINDOW_MS = 60 * 1000;    // 1 minute window
 const PAUSE_DURATION_MS = 15 * 1000; // 15 second pause on exceed
 const ENABLE_RATE_LIMIT_LOGS = process.env.RATE_LIMIT_LOGS !== 'false';
 
-// Cleanup stale entries every 5 minutes
-setInterval(() => {
+// Cleanup stale entries every 5 minutes.
+// Use unref so this timer does not keep Node/Jest processes alive by itself.
+const cleanupInterval = setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of store.entries()) {
         // Remove entries with no recent activity and no active pause
@@ -38,6 +39,10 @@ setInterval(() => {
         }
     }
 }, 5 * 60 * 1000);
+
+if (typeof cleanupInterval.unref === 'function') {
+    cleanupInterval.unref();
+}
 
 function getClientKeyInfo(req: Request): ClientKeyInfo {
     const user = (req as any).user;

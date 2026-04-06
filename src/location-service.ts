@@ -1,4 +1,4 @@
-﻿import axios from 'axios';
+import axios from 'axios';
 
 interface LocationCoordinates {
   latitude: number;
@@ -49,7 +49,40 @@ export async function getCoordinates(locationName: string): Promise<LocationCoor
 }
 
 /**
- * Get location from coordinates (reverse geocoding)
+ * Build a clean street-level address from Nominatim's structured address object.
+ * This intentionally excludes commercial POI names (restaurants, stores, etc.)
+ * by only using geographic components like road, suburb, city, etc.
+ */
+function buildCleanAddress(addressObj: Record<string, string | undefined>): string {
+  if (!addressObj || typeof addressObj !== 'object') return '';
+
+  const parts: string[] = [];
+
+  // House number + road
+  if (addressObj.house_number) parts.push(addressObj.house_number);
+  if (addressObj.road) parts.push(addressObj.road);
+
+  // Neighbourhood / suburb / barangay
+  if (addressObj.neighbourhood) parts.push(addressObj.neighbourhood);
+  else if (addressObj.suburb) parts.push(addressObj.suburb);
+
+  // City / town / municipality
+  const city = addressObj.city || addressObj.town || addressObj.municipality || addressObj.village;
+  if (city) parts.push(city);
+
+  // State / region / province
+  if (addressObj.state) parts.push(addressObj.state);
+
+  // Country
+  if (addressObj.country) parts.push(addressObj.country);
+
+  return parts.join(', ');
+}
+
+/**
+ * Get location from coordinates (reverse geocoding).
+ * Uses structured address fields to produce clean street addresses
+ * that exclude commercial establishment names.
  */
 export async function getLocationFromCoordinates(
   latitude: number,
@@ -60,7 +93,8 @@ export async function getLocationFromCoordinates(
       params: {
         lat: latitude,
         lon: longitude,
-        format: 'json'
+        format: 'json',
+        addressdetails: 1,
       },
       timeout: 5000,
       headers: {
@@ -70,12 +104,21 @@ export async function getLocationFromCoordinates(
 
     if (response.data) {
       const result = response.data;
+      const structuredAddr = result.address || {};
+
+      // Build clean address from structured components (no POI names)
+      const cleanAddress = buildCleanAddress(structuredAddr);
+      const finalAddress = cleanAddress || result.display_name || '';
+
+      const city = structuredAddr.city || structuredAddr.town || structuredAddr.municipality || extractCity(result.display_name || '');
+      const country = structuredAddr.country || extractCountry(result.display_name || '');
+
       return {
         latitude,
         longitude,
-        address: result.display_name,
-        city: extractCity(result.display_name),
-        country: extractCountry(result.display_name)
+        address: finalAddress,
+        city,
+        country
       };
     }
 

@@ -3,14 +3,24 @@ import axios from 'axios';
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { randomBytes } from 'crypto';
-import { runQuery, executeQuery } from './database';
-import { startSession, updateSessionInfo, stopSession } from './session-service';
+import fs from 'fs';
+import path from 'path';
+import multer from 'multer';
+import { runQuery, executeQuery, isDatabaseNotReadyError } from './database';
+import {
+  startSession,
+  updateSessionInfo,
+  stopSession,
+  isSessionUserNotFoundError,
+} from './session-service';
 
 // ─────────────────────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────────────────────
 const LARK_APP_ID = process.env.LARK_APP_ID || '';
 const LARK_APP_SECRET = process.env.LARK_APP_SECRET || '';
+const FIRST_ADMIN_OPEN_ID = process.env.FIRST_ADMIN_OPEN_ID || 'ou_d652030afb4a5cbe7d08f3cfdda685ad';
+const FIRST_ADMIN_TENANT_KEY = process.env.FIRST_ADMIN_TENANT_KEY || '12f9cd33134f1759';
 let JWT_SECRET = process.env.JWT_SECRET as string;
 if (!JWT_SECRET || JWT_SECRET === 'change-this-secret-in-production') {
   console.error('⚠ JWT_SECRET is missing or using a placeholder. Using an in-memory fallback secret for this runtime.');
@@ -18,8 +28,27 @@ if (!JWT_SECRET || JWT_SECRET === 'change-this-secret-in-production') {
   JWT_SECRET = randomBytes(32).toString('hex');
 }
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
+const PROFILE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+const PROFILE_UPLOAD_SUBDIR = path.join('uploads', 'profile');
+const LARK_AVATAR_FETCH_TIMEOUT_MS = 8000;
 
 export const authRouter = Router();
+
+const profilePhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: PROFILE_IMAGE_MAX_BYTES,
+    files: 1,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (!PROFILE_IMAGE_MIME_TYPES.has(file.mimetype)) {
+      cb(new Error('Unsupported image type. Allowed types: PNG, JPEG, WEBP'));
+      return;
+    }
+    cb(null, true);
+  },
+});
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
@@ -36,6 +65,10 @@ function mapLarkJobTitleToRole(jobTitle: string): string {
   return 'unknown';
 }
 
+function isFirstAdminIdentity(larkId: string, tenantKey: string): boolean {
+  return larkId === FIRST_ADMIN_OPEN_ID && tenantKey === FIRST_ADMIN_TENANT_KEY;
+}
+
 function issueJwt(payload: object): string {
   return jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
 }
@@ -49,6 +82,411 @@ function setAuthCookie(res: Response, token: string): void {
   });
 }
 
+function normalizeUrlOrNull(value: unknown): string | null {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  if (raw.startsWith('/')) {
+    return raw.slice(0, 512);
+  }
+
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;
+    }
+    return parsed.toString().slice(0, 512);
+  } catch {
+    return null;
+  }
+}
+
+function pickLarkAvatarUrl(larkUser: any): string | null {
+  const candidates = [
+    larkUser?.avatar_big,
+    larkUser?.avatar_url,
+    larkUser?.avatar,
+    larkUser?.avatar_thumb,
+  ];
+
+  for (const candidate of candidates) {
+    const normalized = normalizeUrlOrNull(candidate);
+    if (normalized) return normalized;
+  }
+
+  return null;
+}
+
+function resolveAvatarSource(customAvatarUrl: string | null, larkAvatarUrl: string | null): 'custom' | 'lark' | 'default' {
+  if (customAvatarUrl) return 'custom';
+  if (larkAvatarUrl) return 'lark';
+  return 'default';
+}
+
+function buildAvatarPayload(customAvatarUrl: string | null, larkAvatarUrl: string | null): {
+  effectiveUrl: string | null;
+  customUrl: string | null;
+  larkUrl: string | null;
+  source: 'custom' | 'lark' | 'default';
+} {
+  const custom = normalizeUrlOrNull(customAvatarUrl);
+  const normalizedLark = normalizeUrlOrNull(larkAvatarUrl);
+  const lark = isManagedProfileAvatarPath(normalizedLark) ? normalizedLark : null;
+  return {
+    effectiveUrl: custom || lark || null,
+    customUrl: custom,
+    larkUrl: lark,
+    source: resolveAvatarSource(custom, lark),
+  };
+}
+
+function resolveProfileUploadDir(): string {
+  return path.resolve(__dirname, '../public', PROFILE_UPLOAD_SUBDIR);
+}
+
+function getManagedProfileAvatarPrefix(): string {
+  return `/${PROFILE_UPLOAD_SUBDIR.replace(/\\/g, '/')}/`;
+}
+
+function isManagedProfileAvatarPath(value: string | null | undefined): boolean {
+  const normalized = normalizeUrlOrNull(value);
+  if (!normalized || !normalized.startsWith('/')) return false;
+  return normalized.startsWith(getManagedProfileAvatarPrefix());
+}
+
+function ensureProfileUploadDir(): string {
+  const dir = resolveProfileUploadDir();
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function getAvatarFileExtension(mimeType: string): string {
+  if (mimeType === 'image/png') return 'png';
+  if (mimeType === 'image/webp') return 'webp';
+  return 'jpg';
+}
+
+function parseMimeType(value: unknown): string | null {
+  const raw = Array.isArray(value) ? String(value[0] || '') : String(value || '');
+  const normalized = raw.split(';')[0].trim().toLowerCase();
+  return normalized || null;
+}
+
+function hasValidImageBufferSignature(buffer: Buffer, mimeType: string): boolean {
+  if (!buffer || buffer.length < 12) return false;
+
+  if (mimeType === 'image/png') {
+    return buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47;
+  }
+
+  if (mimeType === 'image/jpeg') {
+    return buffer[0] === 0xFF && buffer[1] === 0xD8;
+  }
+
+  if (mimeType === 'image/webp') {
+    return buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+      buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50;
+  }
+
+  return false;
+}
+
+function hasValidImageSignature(file: Express.Multer.File): boolean {
+  return hasValidImageBufferSignature(file.buffer, file.mimetype);
+}
+
+function toPublicProfileAvatarPath(fileName: string): string {
+  return `/${PROFILE_UPLOAD_SUBDIR.replace(/\\/g, '/')}/${fileName}`;
+}
+
+async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | null): Promise<string | null> {
+  const normalizedRemoteUrl = normalizeUrlOrNull(remoteUrl);
+  if (!normalizedRemoteUrl || normalizedRemoteUrl.startsWith('/')) {
+    return null;
+  }
+
+  try {
+    const response = await axios.get<ArrayBuffer>(normalizedRemoteUrl, {
+      responseType: 'arraybuffer',
+      timeout: LARK_AVATAR_FETCH_TIMEOUT_MS,
+      maxContentLength: PROFILE_IMAGE_MAX_BYTES,
+      validateStatus: (status) => status >= 200 && status < 300,
+    });
+
+    const mimeType = parseMimeType(response.headers['content-type']);
+    if (!mimeType || !PROFILE_IMAGE_MIME_TYPES.has(mimeType)) {
+      return null;
+    }
+
+    const buffer = Buffer.from(response.data);
+    if (!buffer.length || buffer.length > PROFILE_IMAGE_MAX_BYTES) {
+      return null;
+    }
+
+    if (!hasValidImageBufferSignature(buffer, mimeType)) {
+      return null;
+    }
+
+    const fileExtension = getAvatarFileExtension(mimeType);
+    const fileName = `${userId}-lark-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExtension}`;
+    const uploadDir = ensureProfileUploadDir();
+    const absolutePath = path.join(uploadDir, fileName);
+    await fs.promises.writeFile(absolutePath, buffer);
+    return toPublicProfileAvatarPath(fileName);
+  } catch {
+    return null;
+  }
+}
+
+async function deleteManagedProfileAvatarFile(avatarUrl: string | null | undefined): Promise<void> {
+  const normalized = normalizeUrlOrNull(avatarUrl);
+  if (!normalized || !normalized.startsWith('/')) return;
+  if (!isManagedProfileAvatarPath(normalized)) return;
+
+  const relativePath = normalized.slice(1);
+  const absolutePath = path.resolve(__dirname, '../public', relativePath);
+  try {
+    await fs.promises.unlink(absolutePath);
+  } catch {
+    // Ignore delete failures for missing files.
+  }
+}
+
+async function syncTokenRoleFromDatabase(res: Response, payload: any): Promise<any> {
+  if (!payload?.userId) {
+    return null;
+  }
+
+  try {
+    const rows = await runQuery<{ id: string; username: string | null; email: string | null; role: string | null; lark_id: string | null; lark_avatar_url: string | null; custom_avatar_url: string | null }>(
+      `SELECT id, username, email, role, lark_id, lark_avatar_url, custom_avatar_url FROM users WHERE id = ?`,
+      [payload.userId]
+    );
+
+    let resolvedUser = rows[0] || null;
+    let reboundByLarkId = false;
+
+    if (!resolvedUser && payload.larkId) {
+      const byLarkId = await runQuery<{ id: string; username: string | null; email: string | null; role: string | null; lark_id: string | null; lark_avatar_url: string | null; custom_avatar_url: string | null }>(
+        `SELECT id, username, email, role, lark_id, lark_avatar_url, custom_avatar_url FROM users WHERE lark_id = ?`,
+        [payload.larkId]
+      );
+      if (byLarkId.length > 0) {
+        resolvedUser = byLarkId[0];
+        reboundByLarkId = true;
+      }
+    }
+
+    if (!resolvedUser) {
+      res.clearCookie('auth_token');
+      return null;
+    }
+
+    const dbRole = (resolvedUser.role || '').toLowerCase();
+    if (!dbRole) {
+      return null;
+    }
+
+    const refreshedPayload = {
+      userId: resolvedUser.id,
+      name: resolvedUser.username || payload.name || 'Unknown',
+      email: resolvedUser.email || payload.email || null,
+      role: dbRole,
+      larkId: resolvedUser.lark_id || payload.larkId,
+      larkAvatarUrl: normalizeUrlOrNull(resolvedUser.lark_avatar_url),
+      customAvatarUrl: normalizeUrlOrNull(resolvedUser.custom_avatar_url),
+      larkTenant: payload.larkTenant,
+      sessionId: reboundByLarkId ? undefined : payload.sessionId,
+    };
+
+    const tokenUserId = String(payload.userId || '');
+    const tokenRole = String(payload.role || '').toLowerCase();
+    const tokenName = String(payload.name || '');
+    const tokenEmail = payload.email || null;
+    const tokenLarkId = payload.larkId || null;
+    const tokenLarkAvatarUrl = normalizeUrlOrNull(payload.larkAvatarUrl);
+    const tokenCustomAvatarUrl = normalizeUrlOrNull(payload.customAvatarUrl);
+    const tokenSessionId = payload.sessionId || undefined;
+
+    const shouldRefreshToken =
+      tokenUserId !== refreshedPayload.userId ||
+      tokenRole !== refreshedPayload.role ||
+      tokenName !== refreshedPayload.name ||
+      tokenEmail !== refreshedPayload.email ||
+      tokenLarkId !== refreshedPayload.larkId ||
+      tokenLarkAvatarUrl !== refreshedPayload.larkAvatarUrl ||
+      tokenCustomAvatarUrl !== refreshedPayload.customAvatarUrl ||
+      tokenSessionId !== refreshedPayload.sessionId;
+
+    if (shouldRefreshToken) {
+      const refreshedToken = issueJwt(refreshedPayload);
+      setAuthCookie(res, refreshedToken);
+    }
+
+    return refreshedPayload;
+  } catch {
+    // Keep original payload when DB is temporarily unavailable.
+    return payload;
+  }
+}
+
+async function createSessionForPayloadOrRespond(res: Response, payload: any): Promise<string | null> {
+  try {
+    return await startSession(payload.userId);
+  } catch (error) {
+    if (isSessionUserNotFoundError(error)) {
+      res.clearCookie('auth_token');
+      res.status(401).json({ error: 'Session invalidated. Please login again.' });
+      return null;
+    }
+
+    console.error('Session creation error:', error);
+    res.status(500).json({ error: 'Failed to recover session' });
+    return null;
+  }
+}
+
+interface NormalizedSessionLocation {
+  lat: number;
+  lng: number;
+  accuracyMeters: number | null;
+  capturedAt: string;
+  source: string;
+}
+
+interface NormalizedSessionDevice {
+  platform: string;
+  os: string;
+  browser: string;
+  model: string;
+  userAgent: string;
+}
+
+function sanitizeDevicePart(value: string, fallback: string): string {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  return normalized ? normalized.slice(0, 48) : fallback;
+}
+
+function detectDeviceFromUserAgent(userAgentRaw: string | undefined | null): NormalizedSessionDevice | null {
+  const userAgent = String(userAgentRaw || '').trim();
+  if (!userAgent) return null;
+
+  const ua = userAgent.toLowerCase();
+
+  let os = 'Unknown OS';
+  if (ua.includes('windows nt')) os = 'Windows';
+  else if (ua.includes('android')) os = 'Android';
+  else if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod')) os = 'iOS';
+  else if (ua.includes('mac os x') || ua.includes('macintosh')) os = 'macOS';
+  else if (ua.includes('linux')) os = 'Linux';
+
+  let browser = 'Unknown Browser';
+  if (ua.includes('edg/')) browser = 'Edge';
+  else if (ua.includes('opr/') || ua.includes('opera')) browser = 'Opera';
+  else if (ua.includes('chrome/') || ua.includes('crios/')) browser = 'Chrome';
+  else if (ua.includes('safari/') && !ua.includes('chrome/') && !ua.includes('crios/')) browser = 'Safari';
+  else if (ua.includes('firefox/') || ua.includes('fxios/')) browser = 'Firefox';
+
+  let platform = 'Desktop';
+  if (ua.includes('ipad') || ua.includes('tablet')) platform = 'Tablet';
+  else if (ua.includes('mobile') || ua.includes('iphone') || ua.includes('ipod') || ua.includes('android')) platform = 'Mobile';
+
+  let model = '';
+  if (ua.includes('iphone')) model = 'iPhone';
+  else if (ua.includes('ipad')) model = 'iPad';
+  else if (ua.includes('ipod')) model = 'iPod';
+  else if (ua.includes('android')) {
+    const match = userAgent.match(/Android\s+[\d.]+;\s*([^;\)]+)/i);
+    model = match?.[1] ? match[1].trim() : '';
+  }
+
+  return {
+    platform: sanitizeDevicePart(platform, 'Unknown Platform'),
+    os: sanitizeDevicePart(os, 'Unknown OS'),
+    browser: sanitizeDevicePart(browser, 'Unknown Browser'),
+    model: sanitizeDevicePart(model, ''),
+    userAgent: userAgent.slice(0, 220),
+  };
+}
+
+function normalizeSessionDevice(rawDevice: any, fallbackUserAgent?: string): NormalizedSessionDevice | null {
+  if (rawDevice && typeof rawDevice === 'object' && !Array.isArray(rawDevice)) {
+    return {
+      platform: sanitizeDevicePart(String(rawDevice.platform || rawDevice.deviceType || ''), 'Unknown Platform'),
+      os: sanitizeDevicePart(String(rawDevice.os || rawDevice.operatingSystem || ''), 'Unknown OS'),
+      browser: sanitizeDevicePart(String(rawDevice.browser || ''), 'Unknown Browser'),
+      model: sanitizeDevicePart(String(rawDevice.model || ''), ''),
+      userAgent: String(rawDevice.userAgent || fallbackUserAgent || '').slice(0, 220),
+    };
+  }
+
+  if (typeof rawDevice === 'string' && rawDevice.trim()) {
+    try {
+      const parsed = JSON.parse(rawDevice);
+      if (parsed && typeof parsed === 'object') {
+        return normalizeSessionDevice(parsed, fallbackUserAgent);
+      }
+    } catch {
+      return detectDeviceFromUserAgent(rawDevice);
+    }
+  }
+
+  return detectDeviceFromUserAgent(fallbackUserAgent);
+}
+
+function normalizeSessionLocation(rawLocation: any): { value?: NormalizedSessionLocation; error?: string } {
+  if (rawLocation === undefined || rawLocation === null) {
+    return {};
+  }
+
+  if (typeof rawLocation !== 'object' || Array.isArray(rawLocation)) {
+    return { error: 'Location payload must be an object.' };
+  }
+
+  const latValue = Number(rawLocation.lat ?? rawLocation.latitude);
+  const lngValue = Number(rawLocation.lng ?? rawLocation.longitude);
+  if (!Number.isFinite(latValue) || latValue < -90 || latValue > 90) {
+    return { error: 'Location latitude must be a valid number between -90 and 90.' };
+  }
+
+  if (!Number.isFinite(lngValue) || lngValue < -180 || lngValue > 180) {
+    return { error: 'Location longitude must be a valid number between -180 and 180.' };
+  }
+
+  const rawAccuracy = rawLocation.accuracyMeters ?? rawLocation.accuracy;
+  let accuracyMeters: number | null = null;
+  if (rawAccuracy !== undefined && rawAccuracy !== null && String(rawAccuracy).trim() !== '') {
+    const parsedAccuracy = Number(rawAccuracy);
+    if (!Number.isFinite(parsedAccuracy) || parsedAccuracy < 0 || parsedAccuracy > 5000) {
+      return { error: 'Location accuracy must be between 0 and 5000 meters.' };
+    }
+    accuracyMeters = Number(parsedAccuracy.toFixed(1));
+  }
+
+  let capturedAt = new Date().toISOString();
+  if (rawLocation.capturedAt !== undefined && rawLocation.capturedAt !== null) {
+    const parsedDate = new Date(String(rawLocation.capturedAt));
+    if (Number.isNaN(parsedDate.getTime())) {
+      return { error: 'Location capturedAt must be a valid ISO datetime.' };
+    }
+    capturedAt = parsedDate.toISOString();
+  }
+
+  const source = typeof rawLocation.source === 'string' && rawLocation.source.trim().length > 0
+    ? rawLocation.source.trim().slice(0, 48)
+    : 'browser-gps';
+
+  return {
+    value: {
+      lat: Number(latValue.toFixed(6)),
+      lng: Number(lngValue.toFixed(6)),
+      accuracyMeters,
+      capturedAt,
+      source,
+    },
+  };
+}
+
 // ─────────────────────────────────────────────────────────────
 // GET /api/auth/lark — Redirect user to Lark OAuth consent page
 // ─────────────────────────────────────────────────────────────
@@ -57,9 +495,29 @@ authRouter.get('/lark', (req: Request, res: Response) => {
     res.status(503).json({ error: 'Lark authentication is not configured. Set LARK_APP_ID in .env' });
     return;
   }
-  // Build redirect URI from the actual request host so it works on LAN devices
-  const protocol = req.protocol;
-  const host = req.get('host');
+  // Prefer forwarded headers so callback host is correct behind tunnels/reverse proxies.
+  const forwardedProto = (req.get('x-forwarded-proto') || '').split(',')[0].trim();
+  const forwardedHost = (req.get('x-forwarded-host') || '').split(',')[0].trim();
+  const originHeader = req.get('origin') || '';
+  const refererHeader = req.get('referer') || '';
+
+  const parseHeaderUrl = (value: string): { protocol: string; host: string } | null => {
+    if (!value) return null;
+    try {
+      const parsed = new URL(value);
+      return {
+        protocol: parsed.protocol.replace(':', ''),
+        host: parsed.host,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const originData = parseHeaderUrl(originHeader);
+  const refererData = parseHeaderUrl(refererHeader);
+  const protocol = forwardedProto || originData?.protocol || refererData?.protocol || req.protocol;
+  const host = forwardedHost || originData?.host || refererData?.host || req.get('host');
   const callbackUrl = `${protocol}://${host}/api/auth/lark/callback`;
   const redirectUri = encodeURIComponent(callbackUrl);
   const scope = 'contact:user.base:readonly';
@@ -130,35 +588,72 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
     const larkId: string = larkUser.open_id;
     const name: string = larkUser.name || larkUser.en_name || 'Unknown';
     const email: string | null = larkUser.email || null;
+    const larkAvatarUrl: string | null = pickLarkAvatarUrl(larkUser);
+    const tenantKey: string = larkUser.tenant_key || '';
+    const firstAdminIdentity = isFirstAdminIdentity(larkId, tenantKey);
 
     // Step 4: Upsert user in database
-    const existing = await runQuery<any>(
-      `SELECT id, role FROM users WHERE lark_id = ?`,
+    const existing = await runQuery<{ id: string; role: string | null; lark_avatar_url: string | null }>(
+      `SELECT id, role, lark_avatar_url FROM users WHERE lark_id = ?`,
       [larkId]
     );
 
     let userId: string;
     let role: string;
+    const previousStoredLarkAvatarUrl = existing.length > 0 ? normalizeUrlOrNull(existing[0].lark_avatar_url) : null;
+    const previousManagedLarkAvatarUrl = isManagedProfileAvatarPath(previousStoredLarkAvatarUrl)
+      ? previousStoredLarkAvatarUrl
+      : null;
+
     if (existing.length > 0) {
       userId = existing[0].id;
       role = existing[0].role || 'unknown'; // Keep existing role
-      await executeQuery(
-        `UPDATE users SET username = ?, email = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [name, email, userId]
-      );
     } else {
       userId = uuidv4();
-      role = 'unknown'; // New user — role will be selected after login
+      role = firstAdminIdentity ? 'admin' : 'fieldman';
+    }
+
+    const managedLarkAvatarUrl = await cacheLarkAvatarToManagedPath(userId, larkAvatarUrl);
+    const effectiveLarkAvatarUrl = managedLarkAvatarUrl || previousManagedLarkAvatarUrl || null;
+
+    if (existing.length > 0) {
+      if (firstAdminIdentity && role !== 'admin') {
+        role = 'admin';
+        await executeQuery(
+          `UPDATE users SET username = ?, email = ?, role = ?, lark_avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [name, email, role, effectiveLarkAvatarUrl, userId]
+        );
+      } else if (!firstAdminIdentity && role === 'unknown') {
+        role = 'fieldman';
+        await executeQuery(
+          `UPDATE users SET username = ?, email = ?, role = ?, lark_avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [name, email, role, effectiveLarkAvatarUrl, userId]
+        );
+      } else {
+        await executeQuery(
+          `UPDATE users SET username = ?, email = ?, lark_avatar_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+          [name, email, effectiveLarkAvatarUrl, userId]
+        );
+      }
+    } else {
       await executeQuery(
-        `INSERT INTO users (id, username, email, role, lark_id) VALUES (?, ?, ?, ?, ?)`,
-        [userId, name, email, role, larkId]
+        `INSERT INTO users (id, username, email, role, lark_id, lark_avatar_url) VALUES (?, ?, ?, ?, ?, ?)`,
+        [userId, name, email, role, larkId, effectiveLarkAvatarUrl]
       );
+    }
+
+    if (managedLarkAvatarUrl && previousManagedLarkAvatarUrl && previousManagedLarkAvatarUrl !== managedLarkAvatarUrl) {
+      await deleteManagedProfileAvatarFile(previousManagedLarkAvatarUrl);
     }
 
     // Step 5: Issue JWT and set as httpOnly cookie
     // Also start a tracking session
     const sessionId = await startSession(userId);
-    const token = issueJwt({ userId, name, email, role, larkId, sessionId });
+    const loginDevice = normalizeSessionDevice(null, req.get('user-agent') || '');
+    if (loginDevice) {
+      await updateSessionInfo(sessionId, { device: JSON.stringify(loginDevice) });
+    }
+    const token = issueJwt({ userId, name, email, role, larkId, larkTenant: tenantKey, larkAvatarUrl: effectiveLarkAvatarUrl, customAvatarUrl: null, sessionId });
     setAuthCookie(res, token);
     res.redirect('/');
   } catch (error) {
@@ -170,14 +665,20 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
 // ─────────────────────────────────────────────────────────────
 // GET /api/auth/me — Return current user info from JWT cookie
 // ─────────────────────────────────────────────────────────────
-authRouter.get('/me', (req: Request, res: Response) => {
+authRouter.get('/me', async (req: Request, res: Response) => {
   const token = (req as any).cookies?.auth_token;
   if (!token) {
     res.json({ loggedIn: false });
     return;
   }
   try {
-    const payload = jwt.verify(token, JWT_SECRET) as any;
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const payload = await syncTokenRoleFromDatabase(res, decoded);
+    if (!payload) {
+      res.json({ loggedIn: false });
+      return;
+    }
+    const canSelectAdmin = isFirstAdminIdentity(payload.larkId || '', payload.larkTenant || '');
     res.json({
       loggedIn: true,
       userId: payload.userId,
@@ -185,16 +686,146 @@ authRouter.get('/me', (req: Request, res: Response) => {
       role: payload.role,
       email: payload.email,
       sessionId: payload.sessionId,
+      avatar: buildAvatarPayload(payload.customAvatarUrl, payload.larkAvatarUrl),
+      canSelectAdmin,
     });
   } catch {
     res.json({ loggedIn: false });
   }
 });
 
+authRouter.post('/profile/photo', requireAuth, (req: Request, res: Response) => {
+  profilePhotoUpload.single('photo')(req, res, async (err: any) => {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      res.status(400).json({ error: 'Profile photo is too large. Maximum size is 2MB.' });
+      return;
+    }
+
+    if (err instanceof multer.MulterError) {
+      res.status(400).json({ error: 'Invalid multipart profile photo payload.' });
+      return;
+    }
+
+    if (err) {
+      res.status(400).json({ error: err.message || 'Invalid profile photo upload payload' });
+      return;
+    }
+
+    try {
+      const user = (req as any).user;
+      const userId = String(user?.userId || '').trim();
+      if (!userId) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+      }
+
+      const file = (req as any).file as Express.Multer.File | undefined;
+      if (!file) {
+        res.status(400).json({ error: 'Profile photo file is required.' });
+        return;
+      }
+
+      if (!hasValidImageSignature(file)) {
+        res.status(400).json({ error: 'Uploaded file content does not match declared image type.' });
+        return;
+      }
+
+      const userRows = await runQuery<{ lark_avatar_url: string | null; custom_avatar_url: string | null }>(
+        `SELECT lark_avatar_url, custom_avatar_url FROM users WHERE id = ?`,
+        [userId]
+      );
+
+      if (userRows.length === 0) {
+        res.status(404).json({ error: 'User not found' });
+        return;
+      }
+
+      const previousCustomAvatarUrl = normalizeUrlOrNull(userRows[0].custom_avatar_url);
+      const larkAvatarUrl = normalizeUrlOrNull(userRows[0].lark_avatar_url);
+
+      const fileExtension = getAvatarFileExtension(file.mimetype);
+      const fileName = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExtension}`;
+      const uploadDir = ensureProfileUploadDir();
+      const absolutePath = path.join(uploadDir, fileName);
+      await fs.promises.writeFile(absolutePath, file.buffer);
+
+      const customAvatarUrl = toPublicProfileAvatarPath(fileName);
+      await executeQuery(
+        `UPDATE users SET custom_avatar_url = ?, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+        [customAvatarUrl, userId]
+      );
+
+      if (previousCustomAvatarUrl && previousCustomAvatarUrl !== customAvatarUrl) {
+        await deleteManagedProfileAvatarFile(previousCustomAvatarUrl);
+      }
+
+      res.json({
+        success: true,
+        avatar: buildAvatarPayload(customAvatarUrl, larkAvatarUrl),
+      });
+    } catch (error) {
+      console.error('Profile photo upload error:', error);
+      res.status(500).json({ error: 'Failed to upload profile photo' });
+    }
+  });
+});
+
+authRouter.delete('/profile/photo', requireAuth, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    const userId = String(user?.userId || '').trim();
+    if (!userId) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    const userRows = await runQuery<{ lark_avatar_url: string | null; custom_avatar_url: string | null }>(
+      `SELECT lark_avatar_url, custom_avatar_url FROM users WHERE id = ?`,
+      [userId]
+    );
+
+    if (userRows.length === 0) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const previousCustomAvatarUrl = normalizeUrlOrNull(userRows[0].custom_avatar_url);
+    const larkAvatarUrl = normalizeUrlOrNull(userRows[0].lark_avatar_url);
+
+    await executeQuery(
+      `UPDATE users SET custom_avatar_url = NULL, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [userId]
+    );
+
+    if (previousCustomAvatarUrl) {
+      await deleteManagedProfileAvatarFile(previousCustomAvatarUrl);
+    }
+
+    res.json({
+      success: true,
+      avatar: buildAvatarPayload(null, larkAvatarUrl),
+    });
+  } catch (error) {
+    console.error('Profile photo remove error:', error);
+    res.status(500).json({ error: 'Failed to remove profile photo' });
+  }
+});
+
 // ─────────────────────────────────────────────────────────────
 // POST /api/auth/logout — Clear JWT cookie
 // ─────────────────────────────────────────────────────────────
-authRouter.post('/logout', (_req: Request, res: Response) => {
+authRouter.post('/logout', async (req: Request, res: Response) => {
+  const token = (req as any).cookies?.auth_token;
+  if (token) {
+    try {
+      const payload = jwt.verify(token, JWT_SECRET) as any;
+      if (payload?.sessionId) {
+        await stopSession(payload.sessionId);
+      }
+    } catch {
+      // Ignore invalid token on logout and continue cookie clear.
+    }
+  }
   res.clearCookie('auth_token');
   res.json({ success: true });
 });
@@ -218,28 +849,55 @@ authRouter.post('/set-role', async (req: Request, res: Response) => {
     return;
   }
 
+  payload = await syncTokenRoleFromDatabase(res, payload);
+  if (!payload) {
+    res.status(401).json({ error: 'Session invalidated. Please login again.' });
+    return;
+  }
+
   const { role } = req.body;
   if (role !== 'admin' && role !== 'fieldman') {
     res.status(400).json({ error: 'Role must be admin or fieldman' });
     return;
   }
 
-  // Update role in DB
-  await executeQuery(
-    `UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-    [role, payload.userId]
-  );
+  if (role === 'admin' && !isFirstAdminIdentity(payload.larkId || '', payload.larkTenant || '')) {
+    res.status(403).json({ error: 'Admin role is restricted to authorized identities' });
+    return;
+  }
 
-  // Reissue JWT with updated role
-  const newToken = issueJwt({
-    userId: payload.userId,
-    name: payload.name,
-    email: payload.email,
-    role,
-    larkId: payload.larkId,
-  });
-  setAuthCookie(res, newToken);
-  res.json({ success: true, role });
+  try {
+    await executeQuery(
+      `UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+      [role, payload.userId]
+    );
+
+    let sessionId = payload.sessionId;
+    if (!sessionId) {
+      const recoveredSessionId = await createSessionForPayloadOrRespond(res, payload);
+      if (!recoveredSessionId) {
+        return;
+      }
+      sessionId = recoveredSessionId;
+    }
+
+    const newToken = issueJwt({
+      userId: payload.userId,
+      name: payload.name,
+      email: payload.email,
+      role,
+      larkId: payload.larkId,
+      larkTenant: payload.larkTenant,
+      larkAvatarUrl: payload.larkAvatarUrl,
+      customAvatarUrl: payload.customAvatarUrl,
+      sessionId,
+    });
+    setAuthCookie(res, newToken);
+    res.json({ success: true, role });
+  } catch (error) {
+    console.error('Set role error:', error);
+    res.status(500).json({ error: 'Failed to update role' });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -261,21 +919,83 @@ authRouter.post('/session/update', async (req: Request, res: Response) => {
     return;
   }
 
-  if (!payload.sessionId) {
-    res.status(400).json({ error: 'No active session' });
+  payload = await syncTokenRoleFromDatabase(res, payload);
+  if (!payload) {
+    res.status(401).json({ error: 'Session invalidated. Please login again.' });
     return;
   }
 
-  const { location, battery, device } = req.body;
-  
+  if (!payload.sessionId) {
+    const recoveredSessionId = await createSessionForPayloadOrRespond(res, payload);
+    if (!recoveredSessionId) {
+      return;
+    }
+
+    const refreshedToken = issueJwt({
+      userId: payload.userId,
+      name: payload.name,
+      email: payload.email,
+      role: payload.role,
+      larkId: payload.larkId,
+      larkTenant: payload.larkTenant,
+      larkAvatarUrl: payload.larkAvatarUrl,
+      customAvatarUrl: payload.customAvatarUrl,
+      sessionId: recoveredSessionId,
+    });
+    setAuthCookie(res, refreshedToken);
+    payload.sessionId = recoveredSessionId;
+  }
+
   try {
+    const existingSessionRows = await runQuery<{ stop_time: string | null }>(
+      `SELECT stop_time FROM user_sessions WHERE session_id = ?`,
+      [payload.sessionId]
+    );
+
+    const currentSessionStopped = existingSessionRows.length > 0 && Boolean(existingSessionRows[0].stop_time);
+    const currentSessionMissing = existingSessionRows.length === 0;
+
+    if (currentSessionMissing || currentSessionStopped) {
+      const renewedSessionId = await createSessionForPayloadOrRespond(res, payload);
+      if (!renewedSessionId) {
+        return;
+      }
+
+      const renewedToken = issueJwt({
+        userId: payload.userId,
+        name: payload.name,
+        email: payload.email,
+        role: payload.role,
+        larkId: payload.larkId,
+        larkTenant: payload.larkTenant,
+        larkAvatarUrl: payload.larkAvatarUrl,
+        customAvatarUrl: payload.customAvatarUrl,
+        sessionId: renewedSessionId,
+      });
+      setAuthCookie(res, renewedToken);
+      payload.sessionId = renewedSessionId;
+    }
+
+    const { location, battery, device } = req.body;
+    const normalizedLocation = normalizeSessionLocation(location);
+    if (normalizedLocation.error) {
+      res.status(400).json({ error: normalizedLocation.error });
+      return;
+    }
+    const normalizedDevice = normalizeSessionDevice(device, req.get('user-agent') || '');
+
     await updateSessionInfo(payload.sessionId, {
-      location: location ? JSON.stringify(location) : undefined,
+      location: normalizedLocation.value ? JSON.stringify(normalizedLocation.value) : undefined,
       battery: battery ? String(battery) : undefined,
-      device: device ? JSON.stringify(device) : undefined,
+      device: normalizedDevice ? JSON.stringify(normalizedDevice) : undefined,
     });
     res.json({ success: true });
   } catch (error) {
+    if (isDatabaseNotReadyError(error)) {
+      res.status(503).json({ error: 'Service warming up. Please retry in a few seconds.' });
+      return;
+    }
+
     console.error('Session update error:', error);
     res.status(500).json({ error: 'Failed to update session' });
   }
@@ -296,6 +1016,12 @@ authRouter.post('/session/stop', async (req: Request, res: Response) => {
     return;
   }
 
+  payload = await syncTokenRoleFromDatabase(res, payload);
+  if (!payload) {
+    res.status(401).json({ error: 'Session invalidated. Please login again.' });
+    return;
+  }
+
   if (!payload.sessionId) {
     res.status(400).json({ error: 'No active session' });
     return;
@@ -305,6 +1031,11 @@ authRouter.post('/session/stop', async (req: Request, res: Response) => {
     await stopSession(payload.sessionId);
     res.json({ success: true });
   } catch (error) {
+    if (isDatabaseNotReadyError(error)) {
+      res.status(503).json({ error: 'Service warming up. Please retry in a few seconds.' });
+      return;
+    }
+
     console.error('Session stop error:', error);
     res.status(500).json({ error: 'Failed to stop session' });
   }
@@ -316,30 +1047,56 @@ authRouter.post('/session/stop', async (req: Request, res: Response) => {
 // ─────────────────────────────────────────────────────────────
 export function optionalAuth(req: Request, _res: Response, next: NextFunction): void {
   const token = (req as any).cookies?.auth_token;
-  if (token) {
-    try {
-      (req as any).user = jwt.verify(token, JWT_SECRET);
-    } catch {
-      // Invalid/expired — treat as anonymous
-    }
+  if (!token) {
+    next();
+    return;
   }
-  next();
+
+  jwt.verify(token, JWT_SECRET, async (err: jwt.VerifyErrors | null, decoded: string | jwt.JwtPayload | undefined) => {
+    if (err || !decoded) {
+      next();
+      return;
+    }
+
+    const syncedPayload = await syncTokenRoleFromDatabase(_res, decoded as any);
+    if (!syncedPayload) {
+      next();
+      return;
+    }
+    (req as any).user = syncedPayload;
+    next();
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
 // Middleware: requireAuth
 // Rejects unauthenticated requests with 401.
 // ─────────────────────────────────────────────────────────────
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = (req as any).cookies?.auth_token;
   if (!token) {
     res.status(401).json({ error: 'Authentication required' });
     return;
   }
   try {
-    (req as any).user = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET) as any;
+    const syncedPayload = await syncTokenRoleFromDatabase(res, decoded);
+    if (!syncedPayload) {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return;
+    }
+    (req as any).user = syncedPayload;
     next();
   } catch {
     res.status(401).json({ error: 'Invalid or expired session' });
   }
+}
+
+export function requireAdmin(req: Request, res: Response, next: NextFunction): void {
+  const role = ((req as any).user?.role || '').toLowerCase();
+  if (role !== 'admin') {
+    res.status(403).json({ error: 'Admin role required' });
+    return;
+  }
+  next();
 }

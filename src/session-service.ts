@@ -1,6 +1,17 @@
 import { v4 as uuidv4 } from 'uuid';
 import { executeQuery, runQuery } from './database';
 
+export const SESSION_USER_NOT_FOUND = 'SESSION_USER_NOT_FOUND';
+
+export function isSessionUserNotFoundError(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'code' in (error as Record<string, unknown>) &&
+    (error as Record<string, unknown>).code === SESSION_USER_NOT_FOUND
+  );
+}
+
 export interface SessionInfo {
   location?: string; // JSON string
   battery?: string;
@@ -13,6 +24,17 @@ export interface SessionInfo {
  * @returns The unique session ID.
  */
 export async function startSession(userId: string): Promise<string> {
+  const userRows = await runQuery<{ id: string }>(
+    `SELECT id FROM users WHERE id = ?`,
+    [userId]
+  );
+
+  if (userRows.length === 0) {
+    const error = new Error(`Cannot start session: user ${userId} does not exist`) as Error & { code?: string };
+    error.code = SESSION_USER_NOT_FOUND;
+    throw error;
+  }
+
   const sessionId = uuidv4();
   const id = uuidv4();
   
@@ -51,6 +73,9 @@ export async function updateSessionInfo(sessionId: string, info: SessionInfo): P
   }
   
   if (updates.length === 0) return;
+
+  // Any fresh update means this session is live again.
+  updates.push('stop_time = NULL');
   
   updates.push('updated_at = CURRENT_TIMESTAMP');
   params.push(sessionId);

@@ -13,13 +13,23 @@ let isLoading = false;
 let autoScroll = true;
 let isLoggedIn = false;
 let currentUserId = null; // Set after successful Lark login
+let currentUserLarkAvatarUrl = null;
+let currentUserCustomAvatarUrl = null;
+let currentUserAvatarSource = 'default';
+let pendingProfilePhotoFile = null;
+let pendingProfilePhotoPreviewUrl = null;
 let anonymousHistory = [];
 let pendingSuggestedPrompt = false;
 let pendingImages = [];
 const LANDING_STATE_FADE_MS = 280;
 const DEFAULT_CHAT_TITLE = 'OpenCI Help Desk';
+const LOCATION_CACHE_KEY = 'lastKnownLocationPayload';
+const USER_AVATAR_LARK_KEY = 'userAvatarLarkUrl';
+const USER_AVATAR_CUSTOM_KEY = 'userAvatarCustomUrl';
+const USER_AVATAR_SOURCE_KEY = 'userAvatarSource';
 let aiServiceHardBlocked = false;
 let aiServiceBlockReason = '';
+let sessionHeartbeatTimer = null;
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -49,6 +59,8 @@ const settingsModal = document.getElementById('settingsModal');
 const profileName = document.getElementById('profileName');
 const profileRole = document.getElementById('profileRole');
 const profileLocation = document.getElementById('profileLocation');
+const adminDashboardProfileItem = document.getElementById('adminDashboardProfileItem');
+const adminDashboardProfileLink = document.getElementById('adminDashboardProfileLink');
 const reloadLocationBtn = document.getElementById('reloadLocationBtn');
 const chatTitle = document.getElementById('chatTitle');
 const chatSubtitle = document.getElementById('chatSubtitle');
@@ -65,8 +77,18 @@ const logoutBtn = document.getElementById('logoutBtn');
 const saveSettingsBtn = document.getElementById('saveSettingsBtn');
 const clearConversationsBtn = document.getElementById('clearConversationsBtn');
 const exportDataBtn = document.getElementById('exportDataBtn');
+const requestAdminAccessBtn = document.getElementById('requestAdminAccessBtn');
 const modalOverlay = document.getElementById('modalOverlay');
 const settingsBtn = document.getElementById('settingsBtn');
+const sidebarProfileAvatarImg = document.getElementById('sidebarProfileAvatarImg');
+const sidebarProfileAvatarFallback = document.getElementById('sidebarProfileAvatarFallback');
+const sidebarProfileAvatarSource = document.getElementById('sidebarProfileAvatarSource');
+const settingsProfileAvatarImg = document.getElementById('settingsProfileAvatarImg');
+const settingsProfileAvatarFallback = document.getElementById('settingsProfileAvatarFallback');
+const profilePhotoInput = document.getElementById('profilePhotoInput');
+const uploadProfilePhotoBtn = document.getElementById('uploadProfilePhotoBtn');
+const removeProfilePhotoBtn = document.getElementById('removeProfilePhotoBtn');
+const profilePhotoHelpText = document.getElementById('profilePhotoHelpText');
 
 function setVisibleChatTitle(title) {
   if (!chatTitle) return;
@@ -100,6 +122,9 @@ async function buildHttpError(response) {
   error.code = payload?.error || null;
   error.provider = payload?.provider || null;
   error.details = details;
+  error.pauseDuration = Number(payload?.pauseDuration || 0);
+  error.remainingSeconds = Number(payload?.remainingSeconds || 0);
+  error.requiresCaptcha = payload?.requiresCaptcha === true;
   return error;
 }
 
@@ -108,6 +133,147 @@ function activateAIServiceBlock(details) {
   aiServiceBlockReason = details || 'AI provider quota/rate limit reached. Chat is temporarily unavailable.';
   setComposerEnabled(false);
   showFriendlyError('AI service limit reached', aiServiceBlockReason);
+}
+
+const PROFILE_PHOTO_MAX_BYTES = 2 * 1024 * 1024;
+const PROFILE_PHOTO_ALLOWED_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
+
+function normalizeAvatarUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+  if (raw.startsWith('/')) return raw;
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return parsed.toString();
+    }
+  } catch (_error) {
+    return null;
+  }
+  return null;
+}
+
+function getEffectiveUserAvatarUrl() {
+  return normalizeAvatarUrl(currentUserCustomAvatarUrl) || normalizeAvatarUrl(currentUserLarkAvatarUrl) || null;
+}
+
+function getAvatarSourceLabel() {
+  if (currentUserAvatarSource === 'custom') return 'Custom profile photo';
+  if (currentUserAvatarSource === 'lark') return 'Lark profile photo';
+  return 'Default profile image';
+}
+
+function persistAvatarState() {
+  if (currentUserLarkAvatarUrl) {
+    localStorage.setItem(USER_AVATAR_LARK_KEY, currentUserLarkAvatarUrl);
+  } else {
+    localStorage.removeItem(USER_AVATAR_LARK_KEY);
+  }
+
+  if (currentUserCustomAvatarUrl) {
+    localStorage.setItem(USER_AVATAR_CUSTOM_KEY, currentUserCustomAvatarUrl);
+  } else {
+    localStorage.removeItem(USER_AVATAR_CUSTOM_KEY);
+  }
+
+  localStorage.setItem(USER_AVATAR_SOURCE_KEY, currentUserAvatarSource || 'default');
+}
+
+function clearStoredAvatarState() {
+  localStorage.removeItem(USER_AVATAR_LARK_KEY);
+  localStorage.removeItem(USER_AVATAR_CUSTOM_KEY);
+  localStorage.removeItem(USER_AVATAR_SOURCE_KEY);
+}
+
+function loadAvatarStateFromStorage() {
+  currentUserLarkAvatarUrl = normalizeAvatarUrl(localStorage.getItem(USER_AVATAR_LARK_KEY));
+  currentUserCustomAvatarUrl = normalizeAvatarUrl(localStorage.getItem(USER_AVATAR_CUSTOM_KEY));
+  const source = String(localStorage.getItem(USER_AVATAR_SOURCE_KEY) || 'default').toLowerCase();
+  currentUserAvatarSource = source === 'custom' || source === 'lark' ? source : 'default';
+}
+
+function applyAvatarPayload(avatarPayload) {
+  currentUserLarkAvatarUrl = normalizeAvatarUrl(avatarPayload?.larkUrl);
+  currentUserCustomAvatarUrl = normalizeAvatarUrl(avatarPayload?.customUrl);
+
+  const source = String(avatarPayload?.source || '').toLowerCase();
+  if (source === 'custom' || source === 'lark') {
+    currentUserAvatarSource = source;
+  } else if (currentUserCustomAvatarUrl) {
+    currentUserAvatarSource = 'custom';
+  } else if (currentUserLarkAvatarUrl) {
+    currentUserAvatarSource = 'lark';
+  } else {
+    currentUserAvatarSource = 'default';
+  }
+
+  persistAvatarState();
+}
+
+function revokePendingProfilePhotoPreview() {
+  if (pendingProfilePhotoPreviewUrl) {
+    URL.revokeObjectURL(pendingProfilePhotoPreviewUrl);
+  }
+  pendingProfilePhotoPreviewUrl = null;
+}
+
+function setProfilePhotoHelpText(message) {
+  if (!profilePhotoHelpText) return;
+  profilePhotoHelpText.textContent = message;
+}
+
+function renderUserAvatarUI() {
+  const effectiveAvatarUrl = pendingProfilePhotoPreviewUrl || getEffectiveUserAvatarUrl();
+
+  if (sidebarProfileAvatarImg && sidebarProfileAvatarFallback) {
+    if (effectiveAvatarUrl) {
+      sidebarProfileAvatarImg.src = effectiveAvatarUrl;
+      sidebarProfileAvatarImg.hidden = false;
+      sidebarProfileAvatarFallback.hidden = true;
+      sidebarProfileAvatarImg.onerror = () => {
+        sidebarProfileAvatarImg.hidden = true;
+        sidebarProfileAvatarFallback.hidden = false;
+      };
+    } else {
+      sidebarProfileAvatarImg.hidden = true;
+      sidebarProfileAvatarFallback.hidden = false;
+    }
+  }
+
+  if (sidebarProfileAvatarSource) {
+    sidebarProfileAvatarSource.textContent = getAvatarSourceLabel();
+  }
+
+  if (settingsProfileAvatarImg && settingsProfileAvatarFallback) {
+    if (effectiveAvatarUrl) {
+      settingsProfileAvatarImg.src = effectiveAvatarUrl;
+      settingsProfileAvatarImg.hidden = false;
+      settingsProfileAvatarFallback.hidden = true;
+      settingsProfileAvatarImg.onerror = () => {
+        settingsProfileAvatarImg.hidden = true;
+        settingsProfileAvatarFallback.hidden = false;
+      };
+    } else {
+      settingsProfileAvatarImg.hidden = true;
+      settingsProfileAvatarFallback.hidden = false;
+    }
+  }
+
+  if (uploadProfilePhotoBtn) {
+    uploadProfilePhotoBtn.disabled = !isLoggedIn;
+  }
+
+  if (removeProfilePhotoBtn) {
+    removeProfilePhotoBtn.disabled = !isLoggedIn || !currentUserCustomAvatarUrl;
+  }
+
+  if (!isLoggedIn) {
+    setProfilePhotoHelpText('Log in with Lark to upload a profile photo.');
+  } else if (pendingProfilePhotoFile) {
+    setProfilePhotoHelpText(`Selected: ${pendingProfilePhotoFile.name}. Click Save Settings to upload.`);
+  } else {
+    setProfilePhotoHelpText('Use PNG, JPG, or WEBP. Max file size: 2MB.');
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -121,6 +287,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Check if the user is already logged in (JWT cookie via /api/auth/me)
   await checkAuthSession();
+  startSessionHeartbeat();
 
   // Load CAPTCHA provider configuration.
   await loadCaptchaConfig();
@@ -152,9 +319,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Always start a fresh new chat on page load
   await startNewChat();
 
-  // Sidebar starts collapsed on desktop landing page
+  // Sidebar starts open on desktop landing page.
   if (window.innerWidth > 768) {
-    sidebar.classList.add('desktop-collapsed');
+    sidebar.classList.remove('desktop-collapsed');
+    localStorage.setItem('sidebarCollapsed', 'false');
   }
 });
 
@@ -178,19 +346,74 @@ async function checkAuthSession() {
       if (data.email) {
         localStorage.setItem('userEmail', data.email);
       }
+      applyAvatarPayload(data.avatar || null);
+      updateRoleSelectionPermissions(Boolean(data.canSelectAdmin));
       updateAuthButtons(true);
       updateProfileUI();
+      startSessionHeartbeat();
 
       // If role is unknown, show role selection modal
       if (!data.role || data.role === 'unknown') {
         showRoleSelectionModal();
       }
     } else {
+      isLoggedIn = false;
+      currentUserId = null;
+      currentUserRole = 'Identifying...';
+      currentUserLarkAvatarUrl = null;
+      currentUserCustomAvatarUrl = null;
+      currentUserAvatarSource = 'default';
+      pendingProfilePhotoFile = null;
+      revokePendingProfilePhotoPreview();
+      clearStoredAvatarState();
+      updateRoleSelectionPermissions(false);
       updateAuthButtons(false);
+      updateProfileUI();
+      stopSessionHeartbeat();
     }
   } catch (e) {
     console.warn('Auth session check failed:', e);
+    isLoggedIn = false;
+    currentUserId = null;
+    currentUserRole = 'Identifying...';
+    currentUserLarkAvatarUrl = null;
+    currentUserCustomAvatarUrl = null;
+    currentUserAvatarSource = 'default';
+    pendingProfilePhotoFile = null;
+    revokePendingProfilePhotoPreview();
+    clearStoredAvatarState();
+    updateRoleSelectionPermissions(false);
     updateAuthButtons(false);
+    updateProfileUI();
+    stopSessionHeartbeat();
+  }
+}
+
+function updateRoleSelectionPermissions(canSelectAdmin) {
+  const selectAdminBtn = document.getElementById('selectAdminBtn');
+  if (!selectAdminBtn) return;
+  const roleButtons = selectAdminBtn.parentElement;
+  let adminRoleTextHint = document.getElementById('adminRoleTextHint');
+
+  if (canSelectAdmin) {
+    selectAdminBtn.style.display = 'flex';
+    selectAdminBtn.disabled = false;
+    selectAdminBtn.title = 'Select Admin role';
+    selectAdminBtn.classList.remove('role-btn-disabled');
+    if (adminRoleTextHint) {
+      adminRoleTextHint.remove();
+    }
+  } else {
+    selectAdminBtn.style.display = 'none';
+    selectAdminBtn.disabled = true;
+    selectAdminBtn.classList.add('role-btn-disabled');
+    if (!adminRoleTextHint && roleButtons) {
+      adminRoleTextHint = document.createElement('span');
+      adminRoleTextHint.id = 'adminRoleTextHint';
+      adminRoleTextHint.className = 'role-static-text';
+      adminRoleTextHint.textContent = 'Admin';
+      roleButtons.insertBefore(adminRoleTextHint, roleButtons.firstChild);
+    }
   }
 }
 
@@ -212,15 +435,59 @@ async function selectRole(role) {
       credentials: 'include',
       body: JSON.stringify({ role }),
     });
-    if (!response.ok) throw new Error('Failed to set role');
+    if (!response.ok) {
+      let errorMessage = 'Failed to set role';
+      try {
+        const payload = await response.json();
+        if (payload?.error) errorMessage = payload.error;
+      } catch (_err) {
+        // Ignore parse errors and keep default message.
+      }
+      throw new Error(errorMessage);
+    }
     const data = await response.json();
     currentUserRole = data.role.charAt(0).toUpperCase() + data.role.slice(1);
     localStorage.setItem('userRole', currentUserRole);
     updateProfileUI();
     hideRoleSelectionModal();
+    getUserLocation();
   } catch (e) {
     console.error('Error setting role:', e);
-    alert('Failed to set role. Please try again.');
+    alert(e instanceof Error ? e.message : 'Failed to set role. Please try again.');
+  }
+}
+
+async function requestAdminAccess() {
+  if (!isLoggedIn) {
+    alert('Please login first before sending an admin access request.');
+    return;
+  }
+
+  const reason = window.prompt('Enter reason for requesting Admin access:');
+  if (!reason || reason.trim().length < 8) {
+    alert('Please provide at least 8 characters for your reason.');
+    return;
+  }
+
+  try {
+    const response = await fetch('/api/approvals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        requestType: 'role_elevation_admin',
+        reason: reason.trim(),
+      }),
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload?.error || 'Failed to submit request');
+    }
+
+    alert('Admin access request submitted successfully.');
+  } catch (error) {
+    alert(error instanceof Error ? error.message : 'Failed to submit admin access request.');
   }
 }
 
@@ -317,6 +584,15 @@ function setupEventListeners() {
     getUserLocation();
   });
 
+  if (adminDashboardProfileLink) {
+    adminDashboardProfileLink.addEventListener('click', (event) => {
+      const normalizedRole = (currentUserRole || '').trim().toLowerCase();
+      if (!isLoggedIn || normalizedRole !== 'admin') {
+        event.preventDefault();
+      }
+    });
+  }
+
   // Auth buttons
   if (loginBtn) {
     loginBtn.addEventListener('click', () => {
@@ -336,12 +612,28 @@ function setupEventListeners() {
       currentUserId = null;
       currentUserName = 'User';
       currentUserRole = 'Identifying...';
+      currentUserLarkAvatarUrl = null;
+      currentUserCustomAvatarUrl = null;
+      currentUserAvatarSource = 'default';
+      pendingProfilePhotoFile = null;
+      revokePendingProfilePhotoPreview();
       localStorage.removeItem('userName');
       localStorage.removeItem('userRole');
+      clearStoredAvatarState();
       updateAuthButtons(false);
+      updateProfileUI();
+      stopSessionHeartbeat();
       await startNewChat();
     });
   }
+
+  window.addEventListener('pagehide', () => {
+    stopSessionOnExit();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    stopSessionOnExit();
+  });
 
   // Role selection buttons
   const selectAdminBtn = document.getElementById('selectAdminBtn');
@@ -370,6 +662,68 @@ function setupEventListeners() {
     saveSettingsBtn.addEventListener('click', saveSettings);
   }
 
+  if (uploadProfilePhotoBtn && profilePhotoInput) {
+    uploadProfilePhotoBtn.addEventListener('click', () => {
+      if (!isLoggedIn) {
+        showFriendlyError('Login required', 'Please login with Lark before uploading a profile photo.');
+        return;
+      }
+      profilePhotoInput.click();
+    });
+
+    profilePhotoInput.addEventListener('change', (event) => {
+      const input = event.target;
+      const file = input && input.files && input.files[0] ? input.files[0] : null;
+      if (!file) return;
+
+      if (!PROFILE_PHOTO_ALLOWED_TYPES.has(file.type)) {
+        showFriendlyError('Unsupported image type', 'Allowed types: PNG, JPEG, WEBP');
+        profilePhotoInput.value = '';
+        return;
+      }
+
+      if (file.size > PROFILE_PHOTO_MAX_BYTES) {
+        showFriendlyError('Image is too large', 'Maximum profile photo size is 2MB.');
+        profilePhotoInput.value = '';
+        return;
+      }
+
+      pendingProfilePhotoFile = file;
+      revokePendingProfilePhotoPreview();
+      pendingProfilePhotoPreviewUrl = URL.createObjectURL(file);
+      profilePhotoInput.value = '';
+      renderUserAvatarUI();
+    });
+  }
+
+  if (removeProfilePhotoBtn) {
+    removeProfilePhotoBtn.addEventListener('click', async () => {
+      if (!isLoggedIn) {
+        showFriendlyError('Login required', 'Please login with Lark before removing a profile photo.');
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/auth/profile/photo', {
+          method: 'DELETE',
+          credentials: 'include',
+        });
+
+        if (!response.ok) {
+          throw await buildHttpError(response);
+        }
+
+        const payload = await response.json();
+        applyAvatarPayload(payload.avatar || null);
+        pendingProfilePhotoFile = null;
+        revokePendingProfilePhotoPreview();
+        renderUserAvatarUI();
+      } catch (error) {
+        showFriendlyError('Failed to remove profile photo', String(error));
+      }
+    });
+  }
+
   // Clear All Conversations
   if (clearConversationsBtn) {
     clearConversationsBtn.addEventListener('click', clearAllConversations);
@@ -378,6 +732,10 @@ function setupEventListeners() {
   // Export Conversations
   if (exportDataBtn) {
     exportDataBtn.addEventListener('click', exportConversations);
+  }
+
+  if (requestAdminAccessBtn) {
+    requestAdminAccessBtn.addEventListener('click', requestAdminAccess);
   }
 
   // Theme select
@@ -774,12 +1132,6 @@ async function sendMessage() {
     }
 
     if (isLoggedIn) {
-      // Update sidebar role if backend detected one
-      if (data.detectedRole) {
-        currentUserRole = data.detectedRole.charAt(0).toUpperCase() + data.detectedRole.slice(1);
-        localStorage.setItem('userRole', currentUserRole);
-        updateProfileUI();
-      }
       // Update profile name if backend detected the user's name
       if (data.detectedName) {
         currentUserName = data.detectedName;
@@ -804,7 +1156,12 @@ async function sendMessage() {
     }
     // Check if it's a rate limit error from backend
     if ((typeof error?.status === 'number' && error.status === 429) || (error.message && error.message.includes('429'))) {
-      startRateLimitPause(15);
+      const backendPause = Number(error?.remainingSeconds || error?.pauseDuration || 0);
+      const pauseSeconds = Number.isFinite(backendPause) && backendPause > 0
+        ? Math.ceil(backendPause)
+        : RATE_LIMIT_PAUSE_SEC;
+      const requiresCaptcha = error?.requiresCaptcha !== false;
+      startRateLimitPause(pauseSeconds, requiresCaptcha);
     } else {
       showFriendlyError('Failed to send message', error.toString());
     }
@@ -827,7 +1184,7 @@ function showTypingIndicator() {
 
   const avatarEl = document.createElement('img');
   avatarEl.className = 'message-avatar';
-  avatarEl.src = 'headai.png';
+  avatarEl.src = 'assets/branding/headai.png';
   avatarEl.alt = 'OpenCI';
 
   const indicatorEl = document.createElement('div');
@@ -908,17 +1265,24 @@ function addMessageToUI(role, content, attachmentsInput = []) {
   avatarEl.className = 'message-avatar';
 
   if (role === 'assistant') {
-    avatarEl.src = 'headai.png';
+    avatarEl.src = 'assets/branding/headai.png';
     avatarEl.alt = 'OpenCI';
   } else {
-    // User avatar - simple circle with initials or icon
-    const userIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
-      <circle cx="16" cy="16" r="16" fill="#22c55e"/>
-      <circle cx="16" cy="10" r="4" fill="white"/>
-      <path d="M 8 24 Q 8 18 16 18 Q 24 18 24 24" fill="white"/>
-    </svg>`;
-    avatarEl.src = 'data:image/svg+xml,' + encodeURIComponent(userIconSvg);
-    avatarEl.alt = 'User';
+    const effectiveUserAvatar = getEffectiveUserAvatarUrl();
+    if (effectiveUserAvatar) {
+      avatarEl.src = effectiveUserAvatar;
+      avatarEl.alt = `${currentUserName || 'User'} profile photo`;
+      avatarEl.classList.add('message-avatar--photo');
+    } else {
+      // Fallback avatar for anonymous or no-photo users.
+      const userIconSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+        <circle cx="16" cy="16" r="16" fill="#22c55e"/>
+        <circle cx="16" cy="10" r="4" fill="white"/>
+        <path d="M 8 24 Q 8 18 16 18 Q 24 18 24 24" fill="white"/>
+      </svg>`;
+      avatarEl.src = 'data:image/svg+xml,' + encodeURIComponent(userIconSvg);
+      avatarEl.alt = 'User';
+    }
   }
 
   // Create message wrapper
@@ -1020,7 +1384,7 @@ function addMessageToUI(role, content, attachmentsInput = []) {
     Notification.permission === 'granted') {
     new Notification('OpenCI', {
       body: messageText.length > 100 ? messageText.substring(0, 97) + '...' : messageText,
-      icon: 'headai.png'
+      icon: 'assets/branding/headai.png'
     });
   }
 
@@ -1058,39 +1422,39 @@ const SUGGESTED_PROMPTS = {
 
 const SHOWCASE_CARD_ITEMS = [
   {
-    imageSrc: '1.jpg',
+    imageSrc: 'assets/showcase/1.jpg',
     fileType: 'PNG',
     category: 'Credit Investigation',
     title: 'OpenCI Preview 01',
-    caption: 'Drop your first showcase screenshot in public/1.png.',
+    caption: 'Drop your first showcase screenshot in public/assets/showcase/1.jpg.',
   },
   {
-    imageSrc: '2.jpg',
+    imageSrc: 'assets/showcase/2.jpg',
     fileType: 'PNG',
     category: 'Skips and Collect',
     title: 'OpenCI Preview 02',
-    caption: 'Drop your second showcase screenshot in public/2.png.',
+    caption: 'Drop your second showcase screenshot in public/assets/showcase/2.jpg.',
   },
   {
-    imageSrc: '3.jpg',
+    imageSrc: 'assets/showcase/3.jpg',
     fileType: 'PNG',
     category: 'Demand Letter',
     title: 'OpenCI Preview 03',
-    caption: 'Drop your third showcase screenshot in public/3.png.',
+    caption: 'Drop your third showcase screenshot in public/assets/showcase/3.jpg.',
   },
   {
-    imageSrc: '4.jpg',
+    imageSrc: 'assets/showcase/4.jpg',
     fileType: 'PNG',
     category: 'TeleCI',
     title: 'OpenCI Preview 04',
-    caption: 'Drop your fourth showcase screenshot in public/4.png.',
+    caption: 'Drop your fourth showcase screenshot in public/assets/showcase/4.jpg.',
   },
   {
-    imageSrc: '5.jpg',
+    imageSrc: 'assets/showcase/5.jpg',
     fileType: 'PNG',
     category: 'OpenCI Files',
     title: 'OpenCI Preview 05',
-    caption: 'Drop your fifth showcase screenshot in public/5.png.',
+    caption: 'Drop your fifth showcase screenshot in public/assets/showcase/5.jpg.',
   },
 ];
 
@@ -1556,6 +1920,7 @@ function loadSettings() {
   // User profile
   currentUserName = localStorage.getItem('userName') || 'Identifying...';
   currentUserRole = localStorage.getItem('userRole') || 'Identifying...';
+  loadAvatarStateFromStorage();
   userName.value = currentUserName;
   const savedEmail = localStorage.getItem('userEmail');
   if (savedEmail && userEmail) userEmail.value = savedEmail;
@@ -1586,13 +1951,31 @@ function loadSettings() {
 
 function updateProfileUI() {
   profileName.textContent = currentUserName;
-  profileRole.textContent = currentUserRole;
+  const normalizedRole = (currentUserRole || '').trim().toLowerCase();
+  const canAccessAdminDashboard = isLoggedIn && normalizedRole === 'admin';
+  profileRole.textContent = '';
+  if (normalizedRole === 'admin') {
+    profileRole.textContent = 'ADMIN';
+  } else {
+    profileRole.textContent = currentUserRole;
+  }
+  if (requestAdminAccessBtn) {
+    requestAdminAccessBtn.style.display = normalizedRole === 'admin' ? 'none' : 'inline-flex';
+  }
+  if (adminDashboardProfileItem) {
+    adminDashboardProfileItem.hidden = !canAccessAdminDashboard;
+  }
+  if (adminDashboardProfileLink) {
+    adminDashboardProfileLink.setAttribute('aria-hidden', canAccessAdminDashboard ? 'false' : 'true');
+  }
   profileLocation.textContent = currentUserLocation;
   chatSubtitle.textContent = `Ready to help, ${currentUserName}!`;
   // Sync Settings panel inputs
   if (userName) userName.value = currentUserName;
   const savedEmail = localStorage.getItem('userEmail');
   if (userEmail && savedEmail) userEmail.value = savedEmail;
+
+  renderUserAvatarUI();
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1634,6 +2017,224 @@ function toggleProfileContent() {
 // ───────────────────────────────────────────────────────────────────
 // LOCATION SERVICES
 // ───────────────────────────────────────────────────────────────────
+function detectClientDeviceInfo() {
+  const userAgent = navigator.userAgent || '';
+  const platformRaw = navigator.platform || '';
+  const ua = userAgent.toLowerCase();
+
+  let platform = 'Desktop';
+  if (ua.includes('ipad') || ua.includes('tablet')) platform = 'Tablet';
+  else if (ua.includes('mobile') || ua.includes('iphone') || ua.includes('ipod') || ua.includes('android')) platform = 'Mobile';
+
+  let os = 'Unknown OS';
+  if (ua.includes('windows nt')) os = 'Windows';
+  else if (ua.includes('android')) os = 'Android';
+  else if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod')) os = 'iOS';
+  else if (ua.includes('mac os x') || ua.includes('macintosh')) os = 'macOS';
+  else if (ua.includes('linux')) os = 'Linux';
+
+  let browser = 'Unknown Browser';
+  if (ua.includes('edg/')) browser = 'Edge';
+  else if (ua.includes('opr/') || ua.includes('opera')) browser = 'Opera';
+  else if (ua.includes('chrome/') || ua.includes('crios/')) browser = 'Chrome';
+  else if (ua.includes('safari/') && !ua.includes('chrome/') && !ua.includes('crios/')) browser = 'Safari';
+  else if (ua.includes('firefox/') || ua.includes('fxios/')) browser = 'Firefox';
+
+  const model = ua.includes('iphone')
+    ? 'iPhone'
+    : ua.includes('ipad')
+      ? 'iPad'
+      : ua.includes('android')
+        ? 'Android'
+        : '';
+
+  return {
+    platform,
+    os,
+    browser,
+    model,
+    platformRaw: String(platformRaw || '').slice(0, 48),
+    userAgent: userAgent.slice(0, 220),
+  };
+}
+
+async function syncSessionLocation(locationPayload = null, options = {}) {
+  if (!isLoggedIn) {
+    return;
+  }
+
+  const shouldHeartbeat = options.heartbeat !== false;
+
+  try {
+    const response = await fetch('/api/auth/session/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        location: locationPayload || undefined,
+        device: detectClientDeviceInfo(),
+        heartbeat: shouldHeartbeat,
+      }),
+    });
+
+    if (!response.ok && response.status !== 401 && response.status !== 403) {
+      const payload = await response.json().catch(() => ({}));
+      const detail = payload?.error || `status ${response.status}`;
+      console.warn('Session location update failed:', detail);
+    }
+  } catch (error) {
+    console.warn('Session location sync error:', error);
+  }
+}
+
+function stopSessionHeartbeat() {
+  if (sessionHeartbeatTimer) {
+    window.clearInterval(sessionHeartbeatTimer);
+    sessionHeartbeatTimer = null;
+  }
+}
+
+function startSessionHeartbeat() {
+  stopSessionHeartbeat();
+  if (!isLoggedIn) return;
+
+  // Presence-only heartbeat keeps ACTIVE status honest even if live location is disabled.
+  syncSessionLocation(null, { heartbeat: true });
+  window.setTimeout(() => {
+    if (!isLoggedIn) return;
+    syncSessionLocation(null, { heartbeat: true });
+  }, 1200);
+  sessionHeartbeatTimer = window.setInterval(() => {
+    syncSessionLocation(null, { heartbeat: true });
+  }, 10000);
+}
+
+function stopSessionOnExit() {
+  if (!isLoggedIn) return;
+
+  try {
+    const payload = JSON.stringify({ reason: 'page-unload' });
+    const blob = new Blob([payload], { type: 'application/json' });
+    navigator.sendBeacon('/api/auth/session/stop', blob);
+  } catch (_error) {
+    fetch('/api/auth/session/stop', {
+      method: 'POST',
+      credentials: 'include',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: 'page-unload' }),
+    }).catch(() => null);
+  }
+}
+
+function cacheLastKnownLocation(locationPayload) {
+  if (!locationPayload) return;
+  const lat = Number(locationPayload.lat);
+  const lng = Number(locationPayload.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+
+  try {
+    localStorage.setItem(
+      LOCATION_CACHE_KEY,
+      JSON.stringify({
+        lat: Number(lat.toFixed(6)),
+        lng: Number(lng.toFixed(6)),
+        accuracyMeters: Number.isFinite(Number(locationPayload.accuracyMeters))
+          ? Number(Number(locationPayload.accuracyMeters).toFixed(1))
+          : null,
+      })
+    );
+  } catch (_error) {
+    // Ignore storage quota failures.
+  }
+}
+
+function readCachedLocation() {
+  try {
+    const raw = localStorage.getItem(LOCATION_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const lat = Number(parsed?.lat);
+    const lng = Number(parsed?.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+    const accuracy = Number(parsed?.accuracyMeters);
+    return {
+      lat: Number(lat.toFixed(6)),
+      lng: Number(lng.toFixed(6)),
+      accuracyMeters: Number.isFinite(accuracy) ? Number(accuracy.toFixed(1)) : null,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function formatGeoErrorMessage(error) {
+  if (!window.isSecureContext) {
+    return 'Coordinates unavailable (open via HTTPS or localhost to enable GPS).';
+  }
+
+  const code = Number(error?.code);
+  if (code === 1) return 'Coordinates blocked (allow location permission in browser settings).';
+  if (code === 2) return 'Coordinates unavailable (position source not available).';
+  if (code === 3) return 'Coordinates timeout (tap refresh and try again).';
+  return 'Coordinates unavailable.';
+}
+
+async function applyCachedLocationFallback(error) {
+  const cached = readCachedLocation();
+  if (!cached) {
+    return false;
+  }
+
+  const locationPayload = {
+    lat: cached.lat,
+    lng: cached.lng,
+    accuracyMeters: cached.accuracyMeters,
+    capturedAt: new Date().toISOString(),
+    source: 'cached-location',
+  };
+
+  currentUserLocation = `${cached.lat.toFixed(4)}, ${cached.lng.toFixed(4)} (cached)`;
+  updateProfileUI();
+  await syncSessionLocation(locationPayload);
+  console.warn('Using cached location after geolocation error:', error);
+  return true;
+}
+
+async function applyApproximateIpLocationFallback(error) {
+  try {
+    const response = await fetch('https://ipapi.co/json/', { cache: 'no-store' });
+    if (!response.ok) {
+      return false;
+    }
+
+    const payload = await response.json();
+    const lat = Number(payload?.latitude);
+    const lng = Number(payload?.longitude);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+      return false;
+    }
+
+    const locationPayload = {
+      lat: Number(lat.toFixed(6)),
+      lng: Number(lng.toFixed(6)),
+      accuracyMeters: 5000,
+      capturedAt: new Date().toISOString(),
+      source: 'ip-approx',
+    };
+
+    currentUserLocation = `${locationPayload.lat.toFixed(4)}, ${locationPayload.lng.toFixed(4)} (approx)`;
+    updateProfileUI();
+    cacheLastKnownLocation(locationPayload);
+    await syncSessionLocation(locationPayload);
+    console.warn('Using approximate IP location after geolocation error:', error);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
 async function getUserLocation() {
   if (reloadLocationBtn) {
     reloadLocationBtn.classList.add('spinning');
@@ -1642,21 +2243,47 @@ async function getUserLocation() {
     navigator.geolocation.getCurrentPosition(
       async (position) => {
         const { latitude, longitude } = position.coords;
+        const reportedAccuracy = Number(position.coords.accuracy);
+        const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
+          ? Number(reportedAccuracy.toFixed(1))
+          : null;
+        const locationPayload = {
+          lat: Number(latitude.toFixed(6)),
+          lng: Number(longitude.toFixed(6)),
+          accuracyMeters,
+          capturedAt: new Date().toISOString(),
+          source: 'browser-gps',
+        };
+
         // Format coordinates with 4 decimal places
         currentUserLocation = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
         updateProfileUI();
+        cacheLastKnownLocation(locationPayload);
+        await syncSessionLocation(locationPayload);
         if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
       },
-      (error) => {
+      async (error) => {
         console.log('Geolocation error:', error);
-        currentUserLocation = 'Coordinates unavailable';
+        currentUserLocation = formatGeoErrorMessage(error);
         updateProfileUI();
+        await syncSessionLocation(null, { heartbeat: true });
         if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 12000,
+        maximumAge: 0,
       }
     );
   } else {
-    currentUserLocation = 'Geolocation not supported';
-    updateProfileUI();
+    const usedCachedLocation = await applyCachedLocationFallback(null);
+    const usedApproximateLocation = usedCachedLocation
+      ? false
+      : await applyApproximateIpLocationFallback(null);
+    if (!usedCachedLocation && !usedApproximateLocation) {
+      currentUserLocation = 'Geolocation not supported';
+      updateProfileUI();
+    }
     if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
   }
 }
@@ -1676,6 +2303,7 @@ function escapeHtml(text) {
 function openSettings() {
   settingsModal.classList.add('active');
   if (modalOverlay) modalOverlay.classList.add('active');
+  renderUserAvatarUI();
 }
 
 function closeSettings() {
@@ -1683,7 +2311,7 @@ function closeSettings() {
   if (modalOverlay) modalOverlay.classList.remove('active');
 }
 
-function saveSettings() {
+async function saveSettings() {
   const nameVal = userName.value.trim();
   if (nameVal) {
     currentUserName = nameVal;
@@ -1694,6 +2322,38 @@ function saveSettings() {
   if (emailVal) {
     localStorage.setItem('userEmail', emailVal);
   }
+
+  if (pendingProfilePhotoFile) {
+    if (!isLoggedIn) {
+      showFriendlyError('Login required', 'Please login with Lark before uploading a profile photo.');
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append('photo', pendingProfilePhotoFile, pendingProfilePhotoFile.name);
+
+    try {
+      const response = await fetch('/api/auth/profile/photo', {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw await buildHttpError(response);
+      }
+
+      const payload = await response.json();
+      applyAvatarPayload(payload.avatar || null);
+      pendingProfilePhotoFile = null;
+      revokePendingProfilePhotoPreview();
+      renderUserAvatarUI();
+    } catch (error) {
+      showFriendlyError('Failed to upload profile photo', String(error));
+      return;
+    }
+  }
+
   closeSettings();
 }
 
@@ -1729,7 +2389,9 @@ async function exportConversations() {
     a.download = `openci-conversations-${new Date().toISOString().split('T')[0]}.json`;
     document.body.appendChild(a);
     a.click();
-    document.body.removeChild(a);
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
     URL.revokeObjectURL(url);
   } catch (error) {
     console.error('Error exporting conversations:', error);
@@ -1744,12 +2406,15 @@ const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 const RATE_LIMIT_PAUSE_SEC = 15;
 const CAPTCHA_FAIL_LOCKOUT_SEC = 5 * 60; // 5 minutes
+const LOCAL_CAPTCHA_MAX_ATTEMPTS = 3;
 let messageTimestamps = [];
 let rateLimitPaused = false;
 let countdownInterval = null;
 let recaptchaEnabled = false;
 let recaptchaSiteKey = '';
 let recaptchaWidgetId = null;
+let localCaptchaExpectedAnswer = null;
+let localCaptchaAttemptCount = 0;
 
 async function loadCaptchaConfig() {
   try {
@@ -1779,6 +2444,8 @@ function getRecaptchaApi() {
 
 function completeCaptchaSuccess() {
   hideCaptcha();
+  localCaptchaExpectedAnswer = null;
+  localCaptchaAttemptCount = 0;
   resetRateLimit();
   messageInput.focus();
 }
@@ -1851,6 +2518,69 @@ function renderRecaptchaWidget() {
   });
 }
 
+function renderLocalCaptchaChallenge() {
+  const widgetWrap = document.getElementById('captchaRecaptchaWrap');
+  if (!widgetWrap) return;
+
+  const left = Math.floor(Math.random() * 9) + 2;
+  const right = Math.floor(Math.random() * 9) + 2;
+  localCaptchaExpectedAnswer = left + right;
+
+  widgetWrap.innerHTML = `
+    <div class="captcha-fallback" id="captchaFallbackWrap">
+      <p class="captcha-fallback-title">Quick verification</p>
+      <p class="captcha-fallback-question">What is ${left} + ${right}?</p>
+      <div class="captcha-fallback-input-row">
+        <input id="captchaFallbackInput" type="number" inputmode="numeric" class="captcha-fallback-input" placeholder="Enter answer" />
+        <button id="captchaFallbackSubmit" type="button" class="btn btn-primary">Verify</button>
+      </div>
+    </div>
+  `;
+
+  const inputEl = document.getElementById('captchaFallbackInput');
+  const submitEl = document.getElementById('captchaFallbackSubmit');
+  const errorEl = document.getElementById('captchaError');
+  if (errorEl) {
+    errorEl.style.display = 'none';
+    errorEl.textContent = '';
+  }
+
+  const verifyLocalCaptcha = () => {
+    const value = Number((inputEl && inputEl.value) || '');
+    if (Number.isFinite(value) && value === localCaptchaExpectedAnswer) {
+      completeCaptchaSuccess();
+      return;
+    }
+
+    localCaptchaAttemptCount += 1;
+    if (localCaptchaAttemptCount >= LOCAL_CAPTCHA_MAX_ATTEMPTS) {
+      showCaptchaFailure('Too many failed attempts. Locked out for 5 minutes.');
+      return;
+    }
+
+    if (errorEl) {
+      const attemptsLeft = LOCAL_CAPTCHA_MAX_ATTEMPTS - localCaptchaAttemptCount;
+      errorEl.textContent = `Incorrect answer. ${attemptsLeft} attempt(s) left.`;
+      errorEl.style.display = 'block';
+    }
+
+    renderLocalCaptchaChallenge();
+  };
+
+  if (submitEl) {
+    submitEl.addEventListener('click', verifyLocalCaptcha);
+  }
+  if (inputEl) {
+    inputEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        verifyLocalCaptcha();
+      }
+    });
+    inputEl.focus();
+  }
+}
+
 function checkRateLimit() {
   if (rateLimitPaused) return false;
 
@@ -1867,7 +2597,7 @@ function checkRateLimit() {
   return true;
 }
 
-function startRateLimitPause(seconds) {
+function startRateLimitPause(seconds, requiresCaptcha = true) {
   rateLimitPaused = true;
   messageInput.disabled = true;
   sendBtn.disabled = true;
@@ -1899,8 +2629,12 @@ function startRateLimitPause(seconds) {
       clearInterval(countdownInterval);
       if (countdownEl) countdownEl.style.display = 'none';
       localStorage.removeItem('rateLimitPausedUntil');
-      // Show CAPTCHA after countdown
-      showCaptcha();
+      if (requiresCaptcha) {
+        // Show CAPTCHA after countdown
+        showCaptcha();
+      } else {
+        resetRateLimit();
+      }
       return;
     }
     remaining--;
@@ -1969,11 +2703,6 @@ function restoreRateLimitState() {
 // CAPTCHA MODAL (reCAPTCHA only)
 // ═══════════════════════════════════════════════════════════════
 function showCaptcha() {
-  if (!recaptchaEnabled) {
-    showCaptchaFailure('Verification is unavailable right now. Locked out for 5 minutes.');
-    return;
-  }
-
   const modal = document.getElementById('captchaModal');
   const errorEl = document.getElementById('captchaError');
   if (errorEl) errorEl.style.display = 'none';
@@ -1981,7 +2710,18 @@ function showCaptcha() {
 
   // Persist so page reload still shows the CAPTCHA
   localStorage.setItem('rateLimitCaptchaPending', '1');
-  renderRecaptchaWidget();
+
+  const widgetWrap = document.getElementById('captchaRecaptchaWrap');
+  if (widgetWrap) {
+    widgetWrap.innerHTML = '<div id="captchaRecaptchaWidget"></div>';
+  }
+
+  if (recaptchaEnabled && recaptchaSiteKey) {
+    renderRecaptchaWidget();
+    return;
+  }
+
+  renderLocalCaptchaChallenge();
 }
 
 function hideCaptcha() {

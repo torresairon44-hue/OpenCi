@@ -7,10 +7,12 @@ import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { createWorker } from 'tesseract.js';
 import { runQuery, executeQuery } from './database';
-import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment } from './ai-service';
+import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment, AIProviderLimitError } from './ai-service';
 import { getCoordinates, getLocationFromCoordinates, formatCoordinates } from './location-service';
 import { requireAuth } from './auth';
 import { chatRateLimiter, resetRateLimit } from './rate-limiter';
+import { queryChatbotLocationByName, getChatbotLocationScraperStatus } from './chatbot-location-scraper';
+import { getUserLocationByName, formatLocationResponse } from './user-location-service';
 
 // Sanitization helper
 const sanitizeInput = (input: string): string => {
@@ -40,6 +42,368 @@ const OCR_MAX_TOTAL_CHARS = 6_000;
 const OCR_CONCURRENCY = 2;
 const RECAPTCHA_SITE_KEY = process.env.RECAPTCHA_SITE_KEY || '';
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY || '';
+
+interface LocationQueryIntent {
+  personName: string;
+  asksAddress: boolean;
+  requestedRole: 'admin' | 'fieldman' | 'unknown';
+}
+
+function detectRequestedRoleFromText(text: string): 'admin' | 'fieldman' | 'unknown' {
+  const lower = String(text || '').toLowerCase();
+  if (/\badmin\b/i.test(lower)) {
+    return 'admin';
+  }
+  if (/\bfield\s*man\b|\bfieldman\b|\bfield\s*agent\b/i.test(lower)) {
+    return 'fieldman';
+  }
+  return 'unknown';
+}
+
+function cleanCandidatePersonName(value: string): string {
+  return String(value || '')
+    .replace(/[?!.:,;'"/\\|]+/g, ' ')
+    .replace(/\b(where|is|the|of|si|ni|ang|kay|location|coordinates?|coord|address|exact|current|po|please|what|whats|what's|admin|field\s*man|fieldman|field\s*agent|niya|nya|his|her|for|ako|ikaw|ka|my|me|mine|sarili)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
+function containsLocationKeyword(message: string): boolean {
+  const raw = String(message || '').trim();
+  if (!raw) return false;
+  if (/\b(where\s+is|nasaan|asan|saan\s+si|saan\s+banda\s+si|location|lokasyon|coordinates?|coord|address|tirahan|nakatira)\b/i.test(raw)) {
+    return true;
+  }
+
+  // Support casual self-reference phrases like "ako di mo alam" after location-related context.
+  return /\b(ako|ko|akin|my|me|mine)\b/i.test(raw) && /\b(alam|where|nasaan|asan|location|address)\b/i.test(raw);
+}
+
+function detectLocationQueryIntent(message: string): LocationQueryIntent | null {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+
+  const asksAddress = /\b(address|tirahan|location address)\b/i.test(raw);
+  const looksLikeLocationQuestion =
+    /\b(where\s+is|where\s+exactly|nasaan|asan|location\s+of|location\s+for|lokasyon\s+ni|lokasyon\s+ng|coordinates?\s+of|coordinates?\s+ni|coordinates?\s+for|coord\s+ni|address\s+of|address\s+for|address\s+ni|tirahan\s+ni|saan\s+nakatira\s+si|saan\s+si|ano\s+ang\s+(?:address|coordinates?|lokasyon))\b/i.test(raw)
+    || /['’]s\s+address\b/i.test(raw);
+
+  if (!looksLikeLocationQuestion) {
+    return null;
+  }
+
+  const requestedRole = detectRequestedRoleFromText(raw);
+
+  const quotedMatch = raw.match(/["']([^"']{2,120})["']/);
+  if (quotedMatch && quotedMatch[1]) {
+    const cleanedQuoted = cleanCandidatePersonName(quotedMatch[1]);
+    if (cleanedQuoted.length >= 2) {
+      return { personName: cleanedQuoted, asksAddress, requestedRole };
+    }
+  }
+
+  const patterns = [
+    /(?:where\s+is|where\s+exactly\s+is|nasaan|asan)\s+(.+)/i,
+    /(?:saan\s+si|saan\s+banda\s+si)\s+(.+)/i,
+    /(?:location|coordinates?|address)\s+of\s+(.+)/i,
+    /(?:location|coordinates?|address)\s+for\s+(.+)/i,
+    /(?:lokasyon|coordinates?|coord|address|tirahan)\s+ni\s+(.+)/i,
+    /(?:lokasyon|coordinates?|coord|address|tirahan)\s+ng\s+(.+)/i,
+    /(?:ano\s+ang\s+(?:address|coordinates?|lokasyon)\s+ni)\s+(.+)/i,
+    /(?:address|tirahan)\s+ni\s+(.+)/i,
+    /saan\s+nakatira\s+si\s+(.+)/i,
+    /(?:what\s+is\s+)?(.+?)['’]s\s+address/i,
+    /name\s+of\s+(?:the\s+)?(?:field\s*man|fieldman|admin)\s+(.+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match || !match[1]) continue;
+
+    const cleaned = cleanCandidatePersonName(match[1]);
+    if (cleaned.length >= 2) {
+      return { personName: cleaned, asksAddress, requestedRole };
+    }
+  }
+
+  return null;
+}
+
+function detectLocationFollowUpIntent(
+  message: string,
+  history: Array<{ role?: string; content?: string }>
+): LocationQueryIntent | null {
+  const raw = String(message || '').trim();
+  if (!raw) return null;
+
+  const asksAddress = /\b(address|tirahan)\b/i.test(raw);
+  const asksCoordinates = /\b(location|coordinates?|coord|lokasyon)\b/i.test(raw);
+  const hasPronoun = /\b(niya|nya|his|her|siya|ito|yun|yan)\b/i.test(raw);
+  const looksLikeFollowUp = (asksAddress || asksCoordinates) && hasPronoun;
+
+  if (!looksLikeFollowUp) {
+    return null;
+  }
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    if (String(item?.role || '').toLowerCase() !== 'user') continue;
+
+    const previousIntent = detectLocationQueryIntent(String(item?.content || ''));
+    if (!previousIntent) continue;
+
+    return {
+      personName: previousIntent.personName,
+      asksAddress,
+      requestedRole: detectRequestedRoleFromText(raw) !== 'unknown'
+        ? detectRequestedRoleFromText(raw)
+        : previousIntent.requestedRole,
+    };
+  }
+
+  return null;
+}
+
+function getMostRecentLocationIntentFromHistory(
+  history: Array<{ role?: string; content?: string }>
+): LocationQueryIntent | null {
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    if (String(item?.role || '').toLowerCase() !== 'user') continue;
+    const previousIntent = detectLocationQueryIntent(String(item?.content || ''));
+    if (previousIntent) {
+      return previousIntent;
+    }
+  }
+  return null;
+}
+
+const LOCATION_TOKEN_STOP_WORDS = new Set([
+  'where', 'is', 'whereis', 'nasaan', 'asan', 'saan', 'banda', 'location', 'lokasyon', 'coordinates', 'coordinate', 'coord',
+  'address', 'tirahan', 'for', 'of', 'ni', 'ng', 'si', 'ang', 'ko', 'akin', 'my', 'me', 'mine', 'alam', 'mo', 'kung',
+  'ano', 'what', 'whats', 'whats', 'exactly', 'please', 'po', 'ba', 'nya', 'niya', 'his', 'her', 'siya', 'admin', 'fieldman',
+  'know', 'u', 'you', 'your', 'ako', 'ikaw', 'ka',
+]);
+
+function inferExplicitLocationTarget(
+  message: string,
+  isAnonymous: boolean
+): { personName: string; requestedRole: 'admin' | 'fieldman' | 'unknown'; ambiguity: string | null } | null {
+  const normalized = String(message || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const tokens = Array.from(new Set(
+    normalized
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !LOCATION_TOKEN_STOP_WORDS.has(token))
+  ));
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  const scores = new Map<string, { personName: string; role: 'admin' | 'fieldman'; score: number }>();
+
+  tokens.forEach((token) => {
+    const matches = queryChatbotLocationByName(token, { isAnonymous });
+    matches.forEach((match) => {
+      const key = `${match.personName}|${match.role}`;
+      const existing = scores.get(key) || {
+        personName: match.personName,
+        role: match.role,
+        score: 0,
+      };
+      existing.score += 1;
+      scores.set(key, existing);
+    });
+  });
+
+  if (scores.size === 0) {
+    return null;
+  }
+
+  const ranked = Array.from(scores.values()).sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    return a.personName.localeCompare(b.personName);
+  });
+
+  const top = ranked[0];
+  const second = ranked[1];
+  const roleFromMessage = detectRequestedRoleFromText(message);
+
+  if (!second || top.score > second.score) {
+    return {
+      personName: top.personName,
+      requestedRole: roleFromMessage !== 'unknown' ? roleFromMessage : top.role,
+      ambiguity: null,
+    };
+  }
+
+  return {
+    personName: top.personName,
+    requestedRole: roleFromMessage,
+    ambiguity: getLocationMatchPreview(ranked.map((item) => ({ personName: item.personName, role: item.role })), 5),
+  };
+}
+
+function extractLocationNameTokens(message: string): string[] {
+  const normalized = String(message || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  return Array.from(new Set(
+    normalized
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 3 && !LOCATION_TOKEN_STOP_WORDS.has(token))
+  ));
+}
+
+function resolveLocationIntentFromMessage(
+  message: string,
+  history: Array<{ role?: string; content?: string }>,
+  isAnonymous: boolean,
+  currentUserName?: string
+): string | null {
+  const directIntent = detectLocationQueryIntent(message);
+  if (directIntent) {
+    return resolveLocationQueryReply(directIntent, isAnonymous);
+  }
+
+  const followUpIntent = detectLocationFollowUpIntent(message, history);
+  if (followUpIntent) {
+    return resolveLocationQueryReply(followUpIntent, isAnonymous);
+  }
+
+  if (!containsLocationKeyword(message)) {
+    return null;
+  }
+
+  const explicitTarget = inferExplicitLocationTarget(message, isAnonymous);
+  if (explicitTarget && explicitTarget.ambiguity) {
+    return `I found multiple possible people in your message. Please specify full name and role. Matches: ${explicitTarget.ambiguity}.`;
+  }
+  if (explicitTarget) {
+    const asksAddress = /\b(address|tirahan)\b/i.test(String(message || ''));
+    return resolveLocationQueryReply(
+      {
+        personName: explicitTarget.personName,
+        asksAddress,
+        requestedRole: explicitTarget.requestedRole,
+      },
+      isAnonymous
+    );
+  }
+
+  const explicitNameTokens = extractLocationNameTokens(message);
+  if (explicitNameTokens.length > 0) {
+    const hintedName = explicitNameTokens.join(' ');
+    if (isAnonymous) {
+      return `No visible location record found for ${hintedName}. It may be unavailable or restricted.`;
+    }
+    return `No location record found for ${hintedName}. Please check the spelling and try again.`;
+  }
+
+  const asksAddress = /\b(address|tirahan)\b/i.test(String(message || ''));
+  const asksOwnLocation = /\b(my|me|mine|ko|akin|ako|sarili)\b/i.test(String(message || ''));
+  if (!isAnonymous && asksOwnLocation && currentUserName && currentUserName.trim().length > 0) {
+    return resolveLocationQueryReply(
+      {
+        personName: currentUserName.trim(),
+        asksAddress,
+        requestedRole: 'unknown',
+      },
+      false
+    );
+  }
+
+  const previousIntent = getMostRecentLocationIntentFromHistory(history);
+  if (!previousIntent) {
+    return 'Please include the person name for location lookup (example: where is Ronald Airon or address of Angelo).';
+  }
+
+  return resolveLocationQueryReply(
+    {
+      personName: previousIntent.personName,
+      asksAddress,
+      requestedRole: detectRequestedRoleFromText(message) !== 'unknown'
+        ? detectRequestedRoleFromText(message)
+        : previousIntent.requestedRole,
+    },
+    isAnonymous
+  );
+}
+
+function getLocationMatchPreview(matches: Array<{ personName: string; role: string }>, maxItems = 5): string {
+  const seen = new Set<string>();
+  const preview: string[] = [];
+
+  for (const item of matches) {
+    const key = `${item.personName}|${item.role}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    preview.push(`${item.personName} (${item.role})`);
+    if (preview.length >= maxItems) break;
+  }
+
+  return preview.join(', ');
+}
+
+function resolveLocationQueryReply(intent: LocationQueryIntent, isAnonymous: boolean): string {
+  if (isAnonymous && intent.requestedRole === 'admin') {
+    return 'Anonymous access is restricted for admin location lookups. You can request fieldman location data only.';
+  }
+
+  // Use the new database-backed location service as primary
+  // This function is synchronous, so we'll return a placeholder and handle async in the route
+  // For now, we'll try the scraper first for backward compatibility
+  const status = getChatbotLocationScraperStatus();
+  let matches = queryChatbotLocationByName(intent.personName, { isAnonymous });
+
+  if (matches.length === 0) {
+    // No matches from scraper - will be handled by async database lookup in route
+    // Return a special marker that the route handler will intercept
+    return `__ASYNC_LOCATION_LOOKUP__:${intent.personName}:${intent.requestedRole}:${intent.asksAddress}`;
+  }
+
+  if (intent.requestedRole !== 'unknown') {
+    const roleMatches = matches.filter((item) => item.role === intent.requestedRole);
+    if (roleMatches.length === 0) {
+      const availableRoles = Array.from(new Set(matches.map((item) => item.role))).join(', ');
+      return `I found matches for ${intent.personName}, but none with role ${intent.requestedRole}. Available role(s): ${availableRoles}.`;
+    }
+    matches = roleMatches;
+  }
+
+  const normalizedQuery = intent.personName.toLowerCase();
+  const exactMatches = matches.filter((item) => item.personName.toLowerCase() === normalizedQuery);
+  if (exactMatches.length > 1) {
+    const roleSet = new Set(exactMatches.map((item) => item.role));
+    const preview = getLocationMatchPreview(exactMatches);
+    if (intent.requestedRole === 'unknown' && roleSet.size > 1) {
+      return `I found multiple records for ${intent.personName} with different roles. Please specify role (admin or fieldman). Matches: ${preview}.`;
+    }
+    return `I found multiple records for ${intent.personName}. Please provide a more specific name. Matches: ${preview}.`;
+  }
+
+  if (exactMatches.length === 0 && matches.length > 1) {
+    const roleSet = new Set(matches.map((item) => item.role));
+    const preview = getLocationMatchPreview(matches);
+    if (intent.requestedRole === 'unknown' && roleSet.size > 1) {
+      return `I found multiple people matching ${intent.personName} across different roles. Please specify role (admin or fieldman). Matches: ${preview}.`;
+    }
+    return `I found multiple people matching ${intent.personName}. Please provide the full name for an exact result. Matches: ${preview}.`;
+  }
+
+  const selected = exactMatches[0] || matches[0];
+  const coordinatesText = `${selected.latitude.toFixed(6)}, ${selected.longitude.toFixed(6)}`;
+  const staleSuffix = status.stale ? ' Note: feed is currently stale.' : '';
+
+  if (intent.asksAddress) {
+    if (selected.address && selected.address.trim().length > 0) {
+      return `${selected.personName} (${selected.role}) approximate address: ${selected.address}. Coordinates: ${coordinatesText}.${staleSuffix}`;
+    }
+    return `${selected.personName} (${selected.role}) has no indexed address yet. Coordinates: ${coordinatesText}.${staleSuffix}`;
+  }
+
+  return `${selected.personName} (${selected.role}) coordinates: ${coordinatesText}.${staleSuffix}`;
+}
 
 const chatImageUpload = multer({
   storage: multer.memoryStorage(),
@@ -687,28 +1051,55 @@ chatRouter.post(
       // Generate AI response using Groq AI
       // Exclude the last message (the just-saved user message) since generateAIResponse appends it explicitly
       let aiResponse: string;
-      let detectedRole: string | null = null;
       try {
         const imageAttachments = getImageAttachmentsFromRequest(req);
-        const userProfile: UserProfile | undefined = user
-          ? { name: user.name, role: user.role }
-          : undefined;
+        let locationReply = uploadedAttachments.length === 0
+          ? resolveLocationIntentFromMessage(content, (messages as any[]).slice(0, -1), false, user?.name)
+          : null;
 
-        const result = await generateAIResponse(
-          aiInputContent,
-          (messages as any[]).slice(0, -1),
-          conversationId,
-          userProfile,
-          true,
-          {
-            imageAttachments,
-            ocrExtractedText: ocrPayload.contextText,
-            hasImageInput: uploadedAttachments.length > 0,
-          }
-        );
-        aiResponse = result.text;
-        detectedRole = result.detectedRole;
+        // Handle async location lookup from database if scraper returned no results
+        if (locationReply && locationReply.startsWith('__ASYNC_LOCATION_LOOKUP__:')) {
+          const parts = locationReply.split(':');
+          const personName = parts[1];
+          const requestedRole = parts[2] as 'admin' | 'fieldman' | 'unknown';
+          const asksAddress = parts[3] === 'true';
+          
+          // Query the database for user location
+          const roleFilter = requestedRole !== 'unknown' ? requestedRole : undefined;
+          const locationResult = await getUserLocationByName(personName, roleFilter);
+          locationReply = formatLocationResponse(locationResult, asksAddress);
+        }
+
+        if (locationReply) {
+          aiResponse = locationReply;
+        } else {
+          const userProfile: UserProfile | undefined = user
+            ? { name: user.name, role: user.role }
+            : undefined;
+
+          const result = await generateAIResponse(
+            aiInputContent,
+            (messages as any[]).slice(0, -1),
+            conversationId,
+            userProfile,
+            true,
+            {
+              imageAttachments,
+              ocrExtractedText: ocrPayload.contextText,
+              hasImageInput: uploadedAttachments.length > 0,
+            }
+          );
+          aiResponse = result.text;
+        }
       } catch (error) {
+        if (error instanceof AIProviderLimitError) {
+          res.status(503).json({
+            error: 'ai_provider_limit_reached',
+            provider: error.provider,
+            message: 'AI service limit reached. Please try again later.',
+          });
+          return;
+        }
         console.error('AI generation error:', error);
         aiResponse = 'I apologize, but I encountered an error while processing your request. Please try again.';
       }
@@ -796,7 +1187,7 @@ chatRouter.post(
           content: aiResponse,
         },
         ocrSummary: ocrPayload.summary,
-        detectedRole,
+        detectedRole: null,
         detectedName,
         updatedTitle,
       });
@@ -910,6 +1301,14 @@ chatRouter.get('/health', (_req: Request, res: Response) => {
   });
 });
 
+chatRouter.get('/chatbot/location-status', (_req: Request, res: Response) => {
+  const status = getChatbotLocationScraperStatus();
+  res.json({
+    success: true,
+    status,
+  });
+});
+
 // Captcha client configuration endpoint.
 chatRouter.get('/captcha/config', (_req: Request, res: Response) => {
   const enabled = RECAPTCHA_SITE_KEY.length > 0 && RECAPTCHA_SECRET_KEY.length > 0;
@@ -1009,19 +1408,60 @@ chatRouter.post(
           content: sanitizeInput(String(m.content).substring(0, 5000))
         }));
 
-      const result = await generateAIResponse(
-        aiInputContent,
-        safeHistory,
-        undefined,
-        undefined,
-        false,
-        {
-          suggestedPromptFirstTurn: fromSuggestedPrompt && safeHistory.length === 0,
-          imageAttachments: getImageAttachmentsFromRequest(req),
-          ocrExtractedText: ocrPayload.contextText,
-          hasImageInput: hasUploadedImages,
+      let result: { text: string; detectedRole: string | null };
+      try {
+        let locationReply = hasUploadedImages
+          ? null
+          : resolveLocationIntentFromMessage(content, safeHistory, true, undefined);
+        
+        // Handle async location lookup from database if scraper returned no results
+        if (locationReply && locationReply.startsWith('__ASYNC_LOCATION_LOOKUP__:')) {
+          const parts = locationReply.split(':');
+          const personName = parts[1];
+          const requestedRole = parts[2] as 'admin' | 'fieldman' | 'unknown';
+          const asksAddress = parts[3] === 'true';
+          
+          // For anonymous users, only allow fieldman lookups
+          if (requestedRole === 'admin') {
+            locationReply = 'Anonymous access is restricted for admin location lookups. You can request fieldman location data only.';
+          } else {
+            const roleFilter = requestedRole !== 'unknown' ? requestedRole : 'fieldman';
+            const locationResult = await getUserLocationByName(personName, roleFilter);
+            locationReply = formatLocationResponse(locationResult, asksAddress);
+          }
         }
-      );
+        
+        if (locationReply) {
+          result = {
+            text: locationReply,
+            detectedRole: null,
+          };
+        } else {
+          result = await generateAIResponse(
+            aiInputContent,
+            safeHistory,
+            undefined,
+            undefined,
+            false,
+            {
+              suggestedPromptFirstTurn: fromSuggestedPrompt && safeHistory.length === 0,
+              imageAttachments: getImageAttachmentsFromRequest(req),
+              ocrExtractedText: ocrPayload.contextText,
+              hasImageInput: hasUploadedImages,
+            }
+          );
+        }
+      } catch (error) {
+        if (error instanceof AIProviderLimitError) {
+          res.status(503).json({
+            error: 'ai_provider_limit_reached',
+            provider: error.provider,
+            message: 'AI service limit reached. Please try again later.',
+          });
+          return;
+        }
+        throw error;
+      }
 
       // Detect name from AI response for anonymous users
       let detectedName: string | null = null;

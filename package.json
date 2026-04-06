@@ -2,18 +2,19 @@
   "name": "ai-chatbot",
   "version": "1.0.0",
   "description": "An AI-powered chatbot application similar to OpenAI ChatGPT",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "build": "tsc && node scripts/build-frontend.js",
     "build:server": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "dev": "ts-node src/index.ts",
-    "test": "jest",
+    "test": "jest --runInBand",
     "test:ci": "jest --ci --runInBand",
     "test:allow-empty": "jest --passWithNoTests",
     "preflight": "node scripts/preflight.js",
     "smoke:health": "node scripts/smoke-health.js",
     "smoke:deploy": "npm run preflight && npm run smoke:health",
+    "seed:admin-dummy": "ts-node scripts/seed-admin-dummy.ts",
     "deploy:check": "npm run build && npm run preflight && npm test",
     "deploy:check:allow-empty-tests": "npm run build && npm run preflight && npm run test:allow-empty"
   },
@@ -69,5 +70,8 @@
     "ts-jest": "^29.1.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "path-to-regexp": "0.1.13"
   }
 }

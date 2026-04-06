@@ -7,6 +7,10 @@
   box-sizing: border-box;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 /* Theme color variables */
 :root {
   /* Brand colors — bright green from the OpenCI mascot */
@@ -777,6 +781,22 @@ body.theme-transitioning *::after {
 .role-btn-fieldman:hover {
   border-color: #22c55e;
   background: #f0fdf4;
+}
+
+.role-btn-disabled,
+.role-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.role-static-text {
+  display: inline-flex;
+  align-items: center;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #6b7280;
+  padding: 0.6rem 0.8rem;
 }
 
 /* ===============================================
@@ -2082,21 +2102,72 @@ body {
 }
 
 .profile-avatar {
-  font-size: 48px;
-  color: var(--primary-color);
-  width: 60px;
-  height: 60px;
+  width: 72px;
+  height: 72px;
   display: flex;
   align-items: center;
   justify-content: center;
   background-color: var(--bg-secondary);
-  border-radius: 8px;
+  border-radius: 50%;
+  border: 1px solid rgba(34, 197, 94, 0.28);
+  position: relative;
+  overflow: hidden;
+}
+
+.settings-profile-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.settings-profile-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42px;
+  color: var(--primary-color);
 }
 
 .profile-info {
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.profile-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.profile-photo-hint {
+  width: 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+  .profile-section {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .profile-avatar {
+    margin: 0 auto;
+  }
+
+  .profile-photo-actions {
+    width: 100%;
+  }
+
+  .profile-photo-actions .btn {
+    width: 100%;
+  }
 }
 
 .about-text {
@@ -2311,6 +2382,11 @@ body {
   flex-shrink: 0;
   animation: none;
   transition: transform 0.2s ease;
+}
+
+.message-user .message-avatar.message-avatar--photo {
+  object-fit: cover;
+  border-radius: 50%;
 }
 
 .message-user .message-avatar:hover {
@@ -2665,7 +2741,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 200px;
+  max-height: 260px;
   overflow: hidden;
   transition: max-height 0.3s ease;
 }
@@ -2678,6 +2754,50 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.profile-item[hidden] {
+  display: none !important;
+}
+
+.profile-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.profile-avatar-shell {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  overflow: hidden;
+  border: 1px solid rgba(157, 174, 148, 0.25);
+  background: var(--bg-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.profile-avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.profile-avatar-fallback {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 17px;
+}
+
+.profile-avatar-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .profile-label {
@@ -2693,6 +2813,21 @@ body {
   font-size: 14px;
   font-style: normal;
   color: var(--text-primary);
+}
+
+.profile-role-link {
+  color: var(--primary-color);
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.2s ease, border-color 0.2s ease;
+}
+
+.profile-role-link:hover,
+.profile-role-link:focus-visible {
+  color: var(--text-primary);
+  border-color: var(--text-primary);
+  outline: none;
 }
 
 .profile-location-row {
@@ -2741,6 +2876,41 @@ body {
 .services-section {
   padding: 16px;
   border-bottom: 1px solid rgba(157, 174, 148, 0.12);
+}
+
+.admin-dashboard-link {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+  transition: color 0.2s ease, border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.admin-dashboard-link::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--primary-color);
+  opacity: 0.72;
+  flex-shrink: 0;
+}
+
+.admin-dashboard-link:hover,
+.admin-dashboard-link:focus-visible {
+  color: var(--text-primary);
+  outline: none;
 }
 
 .services-list {
@@ -3338,7 +3508,7 @@ body[data-theme="dark"] .messages-wrapper::before {
   transform: translate(-50%, -50%);
   width: 130vw;
   height: 130vh;
-  background: url('ci.png') no-repeat center center;
+  background: url('assets/branding/ci.png') no-repeat center center;
   background-size: contain;
   filter: blur(18px) drop-shadow(0 0 90px rgba(34, 197, 94, 0.6));
   opacity: 0.25;
@@ -3767,6 +3937,52 @@ body[data-theme="dark"] .captcha-hint {
   margin: 0 auto 12px;
   display: flex;
   justify-content: center;
+}
+
+.captcha-fallback {
+  width: 100%;
+  text-align: center;
+}
+
+.captcha-fallback-title {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.captcha-fallback-question {
+  margin: 0 0 10px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.captcha-fallback-input-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.captcha-fallback-input {
+  width: 120px;
+  padding: 8px 10px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  color: #111827;
+}
+
+body[data-theme="dark"] .captcha-fallback-title {
+  color: #cbd5e1;
+}
+
+body[data-theme="dark"] .captcha-fallback-question {
+  color: #f8fafc;
+}
+
+body[data-theme="dark"] .captcha-fallback-input {
+  border-color: #334155;
+  background: #0f172a;
+  color: #f8fafc;
 }
 
 .captcha-error {

@@ -1,5 +1,5 @@
 /**
- * VECTOR STORE SERVICE (Option B)
+ * VECTOR STORE SERVICE 
  * PostgreSQL + pgvector for semantic search over OpenCI documentation
  * Supports embedding and retrieval of OpenCI knowledge
  */
