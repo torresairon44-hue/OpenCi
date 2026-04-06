@@ -16,6 +16,7 @@ const memoryDB: { [table: string]: Row[] } = {
   messages: [],
   users: [],
   user_sessions: [],
+  user_location_events: [],
   approval_requests: [],
   approval_audit_log: [],
 };
@@ -200,6 +201,19 @@ function inMemoryQuery<T = any>(sql: string, params: any[] = []): T[] {
     return [];
   }
 
+  if (s.startsWith('INSERT INTO USER_LOCATION_EVENTS')) {
+    const now = new Date().toISOString();
+    memoryDB.user_location_events.push({
+      id: params[0],
+      user_id: params[1],
+      lat: Number(params[2]),
+      lng: Number(params[3]),
+      captured_at: params[4] || now,
+      created_at: params[5] || now,
+    });
+    return [];
+  }
+
   if (s.startsWith('INSERT INTO APPROVAL_REQUESTS')) {
     const now = new Date().toISOString();
     memoryDB.approval_requests.push({
@@ -361,6 +375,35 @@ function inMemoryQuery<T = any>(sql: string, params: any[] = []): T[] {
     return [];
   }
 
+  if (s.startsWith('DELETE FROM USER_LOCATION_EVENTS')) {
+    const whereId = sql.match(/WHERE\s+id\s*=\s*\?/i);
+    if (whereId && params.length > 0) {
+      memoryDB.user_location_events = memoryDB.user_location_events.filter((event) => event.id !== params[0]);
+      return [];
+    }
+
+    const whereUserIdBefore = sql.match(/WHERE\s+user_id\s*=\s*\?\s+AND\s+captured_at\s*<\s*\?/i);
+    if (whereUserIdBefore && params.length >= 2) {
+      const userId = params[0];
+      const cutoffMs = Date.parse(String(params[1] || ''));
+      memoryDB.user_location_events = memoryDB.user_location_events.filter((event) => {
+        if (event.user_id !== userId) return true;
+        const eventMs = Date.parse(String(event.captured_at || ''));
+        if (Number.isNaN(cutoffMs) || Number.isNaN(eventMs)) return true;
+        return eventMs >= cutoffMs;
+      });
+      return [];
+    }
+
+    const whereUserId = sql.match(/WHERE\s+user_id\s*=\s*\?/i);
+    if (whereUserId && params.length > 0) {
+      memoryDB.user_location_events = memoryDB.user_location_events.filter((event) => event.user_id !== params[0]);
+      return [];
+    }
+
+    return [];
+  }
+
   return [];
 }
 
@@ -369,6 +412,16 @@ function inMemoryQuery<T = any>(sql: string, params: any[] = []): T[] {
 // ──────────────────────────────────────────────
 let pool: any = null;
 const DB_NOT_READY_CODE = 'DB_NOT_READY';
+let databaseInitialized = false;
+let implicitInMemoryWarningEmitted = false;
+
+function isProductionEnv(): boolean {
+  return (process.env.NODE_ENV || 'development').toLowerCase() === 'production';
+}
+
+function allowInMemoryInProduction(): boolean {
+  return process.env.ALLOW_IN_MEMORY_DB_IN_PRODUCTION === 'true';
+}
 
 function createDatabaseNotReadyError(): Error {
   const error: any = new Error('Database is initializing');
@@ -382,6 +435,16 @@ function ensurePoolReady(): void {
   }
 
   if (!pool) {
+    // In tests/dev, allow transparent in-memory fallback if DB init has not run yet.
+    // This keeps module-import test paths deterministic.
+    if (!isProductionEnv() && !databaseInitialized) {
+      useInMemory = true;
+      if (!implicitInMemoryWarningEmitted) {
+        console.warn('⚠ Database not initialized yet; enabling in-memory fallback for non-production runtime.');
+        implicitInMemoryWarningEmitted = true;
+      }
+      return;
+    }
     throw createDatabaseNotReadyError();
   }
 }
@@ -409,6 +472,7 @@ async function tryLoadPg(config: any): Promise<boolean> {
 }
 
 export async function initializeDatabase(): Promise<void> {
+  databaseInitialized = false;
   const pgHost = process.env.PG_HOST || 'localhost';
   const useSSL =
     process.env.PG_SSL === 'true' ||
@@ -433,10 +497,19 @@ export async function initializeDatabase(): Promise<void> {
   if (connected) {
     console.log(`✅ Connected to PostgreSQL database: ${config.database}`);
     await createTables();
+    databaseInitialized = true;
   } else {
+    if (isProductionEnv() && !allowInMemoryInProduction()) {
+      throw new Error(
+        'PostgreSQL is unavailable. Refusing to start with in-memory fallback in production. '
+        + 'Set ALLOW_IN_MEMORY_DB_IN_PRODUCTION=true only for temporary emergency use.'
+      );
+    }
+
     console.log('⚠️  PostgreSQL unavailable — switching to in-memory store.');
     console.log('💡 Data will be lost when the server restarts. Install PostgreSQL for persistence.');
     useInMemory = true;
+    databaseInitialized = true;
   }
 }
 
@@ -544,6 +617,23 @@ async function createTables(): Promise<void> {
     `);
 
     await client.query(`
+      CREATE TABLE IF NOT EXISTS user_location_events (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        lat DOUBLE PRECISION NOT NULL,
+        lng DOUBLE PRECISION NOT NULL,
+        captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_user_location_events_user_time
+      ON user_location_events (user_id, captured_at DESC)
+    `);
+
+    await client.query(`
       CREATE TABLE IF NOT EXISTS approval_requests (
         id TEXT PRIMARY KEY,
         request_type TEXT NOT NULL,
@@ -595,6 +685,7 @@ function convertPlaceholders(sql: string): string {
 export async function runQuery<T = any>(sql: string, params: any[] = []): Promise<T[]> {
   if (useInMemory) return inMemoryQuery<T>(sql, params);
   ensurePoolReady();
+  if (useInMemory) return inMemoryQuery<T>(sql, params);
   const convertedSql = convertPlaceholders(sql);
   const result = await pool.query(convertedSql, params);
   return (result.rows as T[]) || [];
@@ -607,6 +698,10 @@ export async function executeQuery(sql: string, params: any[] = []): Promise<voi
     return;
   }
   ensurePoolReady();
+  if (useInMemory) {
+    inMemoryQuery(sql, params);
+    return;
+  }
   const convertedSql = convertPlaceholders(sql);
   await pool.query(convertedSql, params);
 }
@@ -626,6 +721,12 @@ export async function executeTransaction(
   }
 
   ensurePoolReady();
+  if (useInMemory) {
+    statements.forEach((statement) => {
+      inMemoryQuery(statement.sql, statement.params || []);
+    });
+    return;
+  }
 
   const client = await pool.connect();
   try {
@@ -652,4 +753,8 @@ export async function closeDatabase(): Promise<void> {
 
 export function getPool(): any {
   return pool;
+}
+
+export function isUsingInMemoryDatabase(): boolean {
+  return useInMemory;
 }

@@ -6,6 +6,7 @@ import { randomBytes } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import multer from 'multer';
+import { del as deleteBlob, put as putBlob } from '@vercel/blob';
 import { runQuery, executeQuery, isDatabaseNotReadyError } from './database';
 import {
   startSession,
@@ -32,6 +33,10 @@ const PROFILE_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
 const PROFILE_IMAGE_MIME_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 const PROFILE_UPLOAD_SUBDIR = path.join('uploads', 'profile');
 const LARK_AVATAR_FETCH_TIMEOUT_MS = 8000;
+const IS_PRODUCTION = (process.env.NODE_ENV || 'development') === 'production';
+const AVATAR_STORAGE_BACKEND = String(process.env.AVATAR_STORAGE_BACKEND || 'auto').trim().toLowerCase();
+const ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION = process.env.ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION === 'true';
+const BLOB_STORAGE_HOST_SUFFIX = '.public.blob.vercel-storage.com';
 
 export const authRouter = Router();
 
@@ -148,10 +153,47 @@ function getManagedProfileAvatarPrefix(): string {
   return `/${PROFILE_UPLOAD_SUBDIR.replace(/\\/g, '/')}/`;
 }
 
+type AvatarStorageBackend = 'blob' | 'filesystem';
+
+function resolveAvatarStorageBackend(): AvatarStorageBackend {
+  if (AVATAR_STORAGE_BACKEND === 'blob') {
+    return 'blob';
+  }
+  if (AVATAR_STORAGE_BACKEND === 'filesystem') {
+    return 'filesystem';
+  }
+
+  const hasBlobToken = String(process.env.BLOB_READ_WRITE_TOKEN || '').trim().length > 0;
+  return hasBlobToken ? 'blob' : 'filesystem';
+}
+
+function canUseFilesystemAvatarStorage(): boolean {
+  if (!IS_PRODUCTION) return true;
+  return ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION;
+}
+
+function isManagedBlobAvatarUrl(value: string | null | undefined): boolean {
+  const normalized = normalizeUrlOrNull(value);
+  if (!normalized || normalized.startsWith('/')) return false;
+  try {
+    const parsed = new URL(normalized);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname.endsWith(BLOB_STORAGE_HOST_SUFFIX)) {
+      return false;
+    }
+    return parsed.pathname.includes('/avatars/');
+  } catch {
+    return false;
+  }
+}
+
 function isManagedProfileAvatarPath(value: string | null | undefined): boolean {
   const normalized = normalizeUrlOrNull(value);
-  if (!normalized || !normalized.startsWith('/')) return false;
-  return normalized.startsWith(getManagedProfileAvatarPrefix());
+  if (!normalized) return false;
+  if (normalized.startsWith('/')) {
+    return normalized.startsWith(getManagedProfileAvatarPrefix());
+  }
+  return isManagedBlobAvatarUrl(normalized);
 }
 
 function ensureProfileUploadDir(): string {
@@ -199,6 +241,49 @@ function toPublicProfileAvatarPath(fileName: string): string {
   return `/${PROFILE_UPLOAD_SUBDIR.replace(/\\/g, '/')}/${fileName}`;
 }
 
+function buildAvatarObjectKey(userId: string, source: 'lark' | 'custom', fileExtension: string): string {
+  const safeUserId = String(userId || '').replace(/[^a-zA-Z0-9_-]/g, '');
+  const randomSuffix = Math.random().toString(36).slice(2, 8);
+  return `avatars/profile/${safeUserId}-${source}-${Date.now()}-${randomSuffix}.${fileExtension}`;
+}
+
+async function persistManagedAvatar(
+  userId: string,
+  source: 'lark' | 'custom',
+  buffer: Buffer,
+  mimeType: string
+): Promise<string | null> {
+  const fileExtension = getAvatarFileExtension(mimeType);
+  const storageBackend = resolveAvatarStorageBackend();
+
+  if (storageBackend === 'blob') {
+    const hasBlobToken = String(process.env.BLOB_READ_WRITE_TOKEN || '').trim().length > 0;
+    if (!hasBlobToken) {
+      throw new Error('BLOB_READ_WRITE_TOKEN is missing for Blob avatar storage.');
+    }
+
+    const blob = await putBlob(buildAvatarObjectKey(userId, source, fileExtension), buffer, {
+      access: 'public',
+      contentType: mimeType,
+      addRandomSuffix: false,
+    });
+    return normalizeUrlOrNull(blob.url);
+  }
+
+  if (!canUseFilesystemAvatarStorage()) {
+    if (source === 'custom') {
+      throw new Error('Filesystem avatar storage is disabled in production. Configure Blob storage.');
+    }
+    return null;
+  }
+
+  const fileName = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExtension}`;
+  const uploadDir = ensureProfileUploadDir();
+  const absolutePath = path.join(uploadDir, fileName);
+  await fs.promises.writeFile(absolutePath, buffer);
+  return toPublicProfileAvatarPath(fileName);
+}
+
 async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | null): Promise<string | null> {
   const normalizedRemoteUrl = normalizeUrlOrNull(remoteUrl);
   if (!normalizedRemoteUrl || normalizedRemoteUrl.startsWith('/')) {
@@ -227,12 +312,7 @@ async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | 
       return null;
     }
 
-    const fileExtension = getAvatarFileExtension(mimeType);
-    const fileName = `${userId}-lark-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExtension}`;
-    const uploadDir = ensureProfileUploadDir();
-    const absolutePath = path.join(uploadDir, fileName);
-    await fs.promises.writeFile(absolutePath, buffer);
-    return toPublicProfileAvatarPath(fileName);
+    return await persistManagedAvatar(userId, 'lark', buffer, mimeType);
   } catch {
     return null;
   }
@@ -240,8 +320,19 @@ async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | 
 
 async function deleteManagedProfileAvatarFile(avatarUrl: string | null | undefined): Promise<void> {
   const normalized = normalizeUrlOrNull(avatarUrl);
-  if (!normalized || !normalized.startsWith('/')) return;
+  if (!normalized) return;
   if (!isManagedProfileAvatarPath(normalized)) return;
+
+  if (!normalized.startsWith('/')) {
+    if (isManagedBlobAvatarUrl(normalized)) {
+      try {
+        await deleteBlob(normalized);
+      } catch {
+        // Ignore delete failures for already-removed Blob files.
+      }
+    }
+    return;
+  }
 
   const relativePath = normalized.slice(1);
   const absolutePath = path.resolve(__dirname, '../public', relativePath);
@@ -434,7 +525,165 @@ function normalizeSessionDevice(rawDevice: any, fallbackUserAgent?: string): Nor
   return detectDeviceFromUserAgent(fallbackUserAgent);
 }
 
-function normalizeSessionLocation(rawLocation: any): { value?: NormalizedSessionLocation; error?: string } {
+const MAX_USER_LOCATION_HISTORY = 10;
+const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane speed)
+const LOCATION_HISTORY_RETENTION_MS = 30 * 60 * 1000; // 30 minutes
+
+interface UserLocationEventRow {
+  id: string;
+  lat: number | string;
+  lng: number | string;
+  captured_at: string | null;
+  created_at: string | null;
+}
+
+function parseLocationEventTimestamp(row: UserLocationEventRow): number | null {
+  const capturedMs = Date.parse(String(row.captured_at || ''));
+  if (!Number.isNaN(capturedMs)) {
+    return capturedMs;
+  }
+
+  const createdMs = Date.parse(String(row.created_at || ''));
+  if (!Number.isNaN(createdMs)) {
+    return createdMs;
+  }
+
+  return null;
+}
+
+async function getUserLocationHistory(userId: string): Promise<Array<{ id: string; lat: number; lng: number; timestamp: number }>> {
+  const rows = await runQuery<UserLocationEventRow>(
+    `SELECT id, lat, lng, captured_at, created_at FROM user_location_events WHERE user_id = ?`,
+    [userId]
+  );
+
+  const events = rows
+    .map((row) => {
+      const lat = Number(row.lat);
+      const lng = Number(row.lng);
+      const timestamp = parseLocationEventTimestamp(row);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || timestamp === null) {
+        return null;
+      }
+      return {
+        id: String(row.id || ''),
+        lat,
+        lng,
+        timestamp,
+      };
+    })
+    .filter((row): row is { id: string; lat: number; lng: number; timestamp: number } => Boolean(row));
+
+  events.sort((a, b) => a.timestamp - b.timestamp);
+  return events;
+}
+
+/**
+ * Calculate distance between two coordinates in meters (Haversine formula)
+ */
+function calculateDistanceMeters(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371000; // Earth radius in meters
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Detect potential location spoofing by checking velocity against user's location history
+ */
+async function detectServerSideSpoofing(
+  userId: string,
+  newLat: number,
+  newLng: number,
+  capturedAtMs: number
+): Promise<{ spoofed: boolean; reason: string | null; confidence: number }> {
+  try {
+    const history = await getUserLocationHistory(userId);
+
+    if (history.length === 0) {
+      return { spoofed: false, reason: null, confidence: 1.0 };
+    }
+
+    const lastEntry = history[history.length - 1];
+    const distance = calculateDistanceMeters(lastEntry.lat, lastEntry.lng, newLat, newLng);
+    const timeDiff = (capturedAtMs - lastEntry.timestamp) / 1000; // seconds
+
+    if (timeDiff <= 0) {
+      return { spoofed: false, reason: null, confidence: 1.0 };
+    }
+
+    const speed = distance / timeDiff; // meters per second
+
+    // If moving faster than physically possible (teleportation) over a significant distance
+    if (speed > MAX_REALISTIC_SPEED_MPS && distance > 1000) {
+      const speedKmh = Math.round(speed * 3.6);
+      console.warn(`[LOCATION SPOOF] User ${userId}: Unrealistic movement ${Math.round(distance)}m in ${Math.round(timeDiff)}s = ${speedKmh} km/h`);
+      return {
+        spoofed: true,
+        reason: `Unrealistic movement: ${speedKmh} km/h over ${Math.round(distance)}m`,
+        confidence: Math.max(0.1, 1 - (speed / (MAX_REALISTIC_SPEED_MPS * 5))),
+      };
+    }
+
+    // Reduce confidence for high speeds (but still possible)
+    if (speed > MAX_REALISTIC_SPEED_MPS * 0.5) {
+      return {
+        spoofed: false,
+        reason: null,
+        confidence: Math.max(0.5, 1 - (speed / (MAX_REALISTIC_SPEED_MPS * 2))),
+      };
+    }
+
+    return { spoofed: false, reason: null, confidence: 1.0 };
+  } catch (error) {
+    console.error(`[LOCATION WARNING] Failed spoof check for user ${userId}:`, error);
+    return { spoofed: false, reason: null, confidence: 1.0 };
+  }
+}
+
+/**
+ * Add location to user's server-side history
+ */
+async function addToUserLocationHistory(userId: string, lat: number, lng: number, capturedAtMs: number): Promise<void> {
+  try {
+    const capturedAtIso = new Date(capturedAtMs).toISOString();
+    const createdAtIso = new Date().toISOString();
+
+    await executeQuery(
+      `INSERT INTO user_location_events (id, user_id, lat, lng, captured_at, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      [uuidv4(), userId, lat, lng, capturedAtIso, createdAtIso]
+    );
+
+    const cutoffIso = new Date(capturedAtMs - LOCATION_HISTORY_RETENTION_MS).toISOString();
+    await executeQuery(
+      `DELETE FROM user_location_events WHERE user_id = ? AND captured_at < ?`,
+      [userId, cutoffIso]
+    );
+
+    const history = await getUserLocationHistory(userId);
+    if (history.length > MAX_USER_LOCATION_HISTORY) {
+      const staleEntries = history.slice(0, history.length - MAX_USER_LOCATION_HISTORY);
+      for (const staleEntry of staleEntries) {
+        await executeQuery(`DELETE FROM user_location_events WHERE id = ?`, [staleEntry.id]);
+      }
+    }
+  } catch (error) {
+    console.error(`[LOCATION WARNING] Failed storing location history for user ${userId}:`, error);
+  }
+}
+
+interface NormalizedSessionLocationExtended extends NormalizedSessionLocation {
+  spoofingDetected?: boolean;
+  spoofingReason?: string | null;
+  confidence?: number;
+}
+
+async function normalizeSessionLocation(rawLocation: any, userId?: string): Promise<{ value?: NormalizedSessionLocationExtended; error?: string }> {
   if (rawLocation === undefined || rawLocation === null) {
     return {};
   }
@@ -475,6 +724,24 @@ function normalizeSessionLocation(rawLocation: any): { value?: NormalizedSession
   const source = typeof rawLocation.source === 'string' && rawLocation.source.trim().length > 0
     ? rawLocation.source.trim().slice(0, 48)
     : 'browser-gps';
+  const capturedAtMs = Date.parse(capturedAt);
+
+  // Server-side spoof detection
+  let spoofingDetected = Boolean(rawLocation.spoofingDetected);
+  let spoofingReason = rawLocation.spoofingReason || null;
+  let confidence = 1.0;
+
+  if (userId) {
+    const serverSpoofCheck = await detectServerSideSpoofing(userId, latValue, lngValue, capturedAtMs);
+    if (serverSpoofCheck.spoofed) {
+      spoofingDetected = true;
+      spoofingReason = serverSpoofCheck.reason;
+    }
+    confidence = serverSpoofCheck.confidence;
+
+    // Add to history for future checks
+    await addToUserLocationHistory(userId, latValue, lngValue, capturedAtMs);
+  }
 
   return {
     value: {
@@ -483,6 +750,9 @@ function normalizeSessionLocation(rawLocation: any): { value?: NormalizedSession
       accuracyMeters,
       capturedAt,
       source,
+      spoofingDetected,
+      spoofingReason,
+      confidence,
     },
   };
 }
@@ -743,13 +1013,12 @@ authRouter.post('/profile/photo', requireAuth, (req: Request, res: Response) => 
       const previousCustomAvatarUrl = normalizeUrlOrNull(userRows[0].custom_avatar_url);
       const larkAvatarUrl = normalizeUrlOrNull(userRows[0].lark_avatar_url);
 
-      const fileExtension = getAvatarFileExtension(file.mimetype);
-      const fileName = `${userId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${fileExtension}`;
-      const uploadDir = ensureProfileUploadDir();
-      const absolutePath = path.join(uploadDir, fileName);
-      await fs.promises.writeFile(absolutePath, file.buffer);
+      const customAvatarUrl = await persistManagedAvatar(userId, 'custom', file.buffer, file.mimetype);
+      if (!customAvatarUrl) {
+        res.status(503).json({ error: 'Avatar storage is currently unavailable. Please try again later.' });
+        return;
+      }
 
-      const customAvatarUrl = toPublicProfileAvatarPath(fileName);
       await executeQuery(
         `UPDATE users SET custom_avatar_url = ?, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
         [customAvatarUrl, userId]
@@ -765,6 +1034,11 @@ authRouter.post('/profile/photo', requireAuth, (req: Request, res: Response) => 
       });
     } catch (error) {
       console.error('Profile photo upload error:', error);
+      const message = String((error as any)?.message || '');
+      if (/filesystem avatar storage is disabled|BLOB_READ_WRITE_TOKEN is missing/i.test(message)) {
+        res.status(503).json({ error: 'Avatar upload requires durable Blob storage configuration in production.' });
+        return;
+      }
       res.status(500).json({ error: 'Failed to upload profile photo' });
     }
   });
@@ -977,11 +1251,17 @@ authRouter.post('/session/update', async (req: Request, res: Response) => {
     }
 
     const { location, battery, device } = req.body;
-    const normalizedLocation = normalizeSessionLocation(location);
+    const normalizedLocation = await normalizeSessionLocation(location, payload.userId);
     if (normalizedLocation.error) {
       res.status(400).json({ error: normalizedLocation.error });
       return;
     }
+    
+    // Log spoofing detection for monitoring
+    if (normalizedLocation.value?.spoofingDetected) {
+      console.warn(`[LOCATION WARNING] User ${payload.userId} (${payload.name}): ${normalizedLocation.value.spoofingReason || 'Spoofing detected'}`);
+    }
+    
     const normalizedDevice = normalizeSessionDevice(device, req.get('user-agent') || '');
 
     await updateSessionInfo(payload.sessionId, {
