@@ -1,7 +1,7 @@
 const request = require('supertest');
 
-// deploy:check runs build first, so dist/index.js is available for this integration test.
-const app = require('../dist/index.js').default;
+// deploy:check runs build first, so dist/src/index.js is available for this integration test.
+const app = require('../dist/src/index.js').default;
 
 describe('GET /api/health', () => {
   test('returns status ok and ISO timestamp', async () => {

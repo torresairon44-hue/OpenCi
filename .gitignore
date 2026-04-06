@@ -55,3 +55,4 @@ build/
 .turbo/
 .github
 .vercel
+.env*.local

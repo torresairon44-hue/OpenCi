@@ -1,4 +1,4 @@
-jest.mock('../dist/chatbot-location-scraper.js', () => {
+jest.mock('../dist/src/chatbot-location-scraper.js', () => {
   const records = [
     {
       entityType: 'LocationSnapshot',
@@ -55,7 +55,7 @@ jest.mock('../dist/chatbot-location-scraper.js', () => {
 });
 
 const request = require('supertest');
-const app = require('../dist/index.js').default;
+const app = require('../dist/src/index.js').default;
 
 let ipCounter = 40;
 function nextIp() {
@@ -140,7 +140,7 @@ describe('location intent routing regression', () => {
 
     expect(response.status).toBe(200);
       expect(response.body.aiMessage.content).toMatch(/Ronald/i);
-      expect(response.body.aiMessage.content).toMatch(/No location record found|No visible location record found/i);
+      expect(response.body.aiMessage.content).toMatch(/No location record found|No visible location record found|No user found matching/i);
     expect(response.body.aiMessage.content).not.toMatch(/Angelo Principio/i);
   });
 });

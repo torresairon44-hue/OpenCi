@@ -418,10 +418,11 @@ app.get('*', (_req: Request, res: Response) => {
 });
 
 async function initializeEnhancedServices(): Promise<void> {
-  try {
-    await initializeDatabase();
-    console.log('✅ Database initialized successfully');
+  // Database is a critical dependency in production and may throw if unavailable.
+  await initializeDatabase();
+  console.log('✅ Database initialized successfully');
 
+  try {
     // Test AI connection
     await testConnection();
     if (isGoogleAIConnected()) {
@@ -495,20 +496,27 @@ function startServer() {
     process.exit(1);
   });
 
-  ensureEnhancedServicesInitialized().finally(() => {
-    if (shouldEnableChatbotLocationScraper()) {
-      const started = startChatbotLocationScraper();
-      if (started) {
-        console.log('🛰 Chatbot location scraper enabled');
-      } else {
-        console.warn('⚠ Chatbot location scraper failed to start (check INTERNAL_SCRAPER_API_KEY)');
+  ensureEnhancedServicesInitialized()
+    .then(() => {
+      if (shouldEnableChatbotLocationScraper()) {
+        const started = startChatbotLocationScraper();
+        if (started) {
+          console.log('🛰 Chatbot location scraper enabled');
+        } else {
+          console.warn('⚠ Chatbot location scraper failed to start (check INTERNAL_SCRAPER_API_KEY)');
+        }
       }
-    }
 
-    if (!isGoogleAIConnected()) {
-      console.log('💡 To enable real AI, add your GROQ_API_KEY to .env');
-    }
-  });
+      if (!isGoogleAIConnected()) {
+        console.log('💡 To enable real AI, add your GROQ_API_KEY to .env');
+      }
+    })
+    .catch((error) => {
+      console.error('❌ Critical startup initialization failed:', error);
+      if (IS_PRODUCTION) {
+        process.exit(1);
+      }
+    });
 }
 
 if (require.main === module) {
