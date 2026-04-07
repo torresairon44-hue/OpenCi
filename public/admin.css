@@ -1228,6 +1228,31 @@ body.admin-exit {
   border-color: rgba(198, 206, 221, 0.35);
 }
 
+.fieldman-source-chip {
+  font-weight: 600;
+}
+
+.fieldman-source-chip.is-gps {
+  color: #8bf4b3;
+  border-color: rgba(139, 244, 179, 0.45);
+}
+
+.fieldman-source-chip.is-cached {
+  color: #9cd2ff;
+  border-color: rgba(156, 210, 255, 0.45);
+}
+
+.fieldman-source-chip.is-approx {
+  color: #ffd08a;
+  border-color: rgba(255, 208, 138, 0.45);
+}
+
+.fieldman-source-chip.is-legacy,
+.fieldman-source-chip.is-unknown {
+  color: #c6cedd;
+  border-color: rgba(198, 206, 221, 0.35);
+}
+
 .fieldman-empty {
   margin: 0;
   padding: 12px 8px;

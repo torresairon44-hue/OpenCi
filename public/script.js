@@ -2240,8 +2240,10 @@ async function applyApproximateIpLocationFallback(error) {
 
     currentUserLocation = `${locationPayload.lat.toFixed(4)}, ${locationPayload.lng.toFixed(4)} (approx)`;
     updateProfileUI();
-    cacheLastKnownLocation(locationPayload);
-    await syncSessionLocation(locationPayload);
+    if (!isLoggedIn) {
+      cacheLastKnownLocation(locationPayload);
+      await syncSessionLocation(locationPayload);
+    }
     console.warn('Using approximate IP location after geolocation error:', error);
     return true;
   } catch (_error) {
@@ -2265,11 +2267,23 @@ function stopLocationWatch() {
 function hasLocationChangedSignificantly(newPayload, oldPayload) {
   if (!oldPayload) return true;
   if (!newPayload) return false;
-  
-  const latDiff = Math.abs(newPayload.lat - oldPayload.lat);
-  const lngDiff = Math.abs(newPayload.lng - oldPayload.lng);
-  // ~10 meters = ~0.0001 degrees
-  return latDiff > 0.0001 || lngDiff > 0.0001;
+
+  const distanceMeters = calculateDistanceMeters(
+    Number(oldPayload.lat),
+    Number(oldPayload.lng),
+    Number(newPayload.lat),
+    Number(newPayload.lng)
+  );
+
+  const newAccuracy = Number(newPayload.accuracyMeters);
+  const oldAccuracy = Number(oldPayload.accuracyMeters);
+  const dynamicThreshold = Math.max(
+    MIN_SIGNIFICANT_MOVE_METERS,
+    Number.isFinite(newAccuracy) && newAccuracy > 0 ? newAccuracy * 0.35 : 0,
+    Number.isFinite(oldAccuracy) && oldAccuracy > 0 ? oldAccuracy * 0.35 : 0
+  );
+
+  return distanceMeters > dynamicThreshold;
 }
 
 // Anti-spoofing: track location history for velocity checks
@@ -2277,6 +2291,8 @@ const locationHistory = [];
 const MAX_LOCATION_HISTORY = 10;
 const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane)
 const MIN_ACCURACY_THRESHOLD = 500; // Warn if accuracy > 500m
+const MAX_SYNC_ACCURACY_METERS = 1200; // Keep noisy readings from overriding known stable coordinates.
+const MIN_SIGNIFICANT_MOVE_METERS = 25;
 
 /**
  * Calculate distance between two coordinates in meters (Haversine formula)
@@ -2346,6 +2362,7 @@ async function processGeoPosition(position, source = 'browser-gps') {
   const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
     ? Number(reportedAccuracy.toFixed(1))
     : null;
+  const hasReliableFix = !Number.isFinite(accuracyMeters) || Number(accuracyMeters) <= MAX_SYNC_ACCURACY_METERS;
   
   // Anti-spoofing: Check for unrealistic movement
   const spoofCheck = detectLocationSpoofing(latitude, longitude, Date.now());
@@ -2361,8 +2378,10 @@ async function processGeoPosition(position, source = 'browser-gps') {
     spoofingReason: spoofCheck.reason || null,
   };
 
-  // Add to history for future spoof detection
-  addToLocationHistory(latitude, longitude);
+  // Only use reasonably accurate fixes for velocity history.
+  if (hasReliableFix) {
+    addToLocationHistory(latitude, longitude);
+  }
 
   // Format coordinates with accuracy indicator for display
   let displayLocation = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
@@ -2375,10 +2394,13 @@ async function processGeoPosition(position, source = 'browser-gps') {
   
   currentUserLocation = displayLocation;
   updateProfileUI();
-  cacheLastKnownLocation(locationPayload);
+  if (hasReliableFix) {
+    cacheLastKnownLocation(locationPayload);
+  }
   
-  // Only sync if location changed significantly or first update
-  if (hasLocationChangedSignificantly(locationPayload, lastSyncedLocationPayload)) {
+  // Keep existing stable GPS fix if the new reading is too noisy.
+  const shouldSyncLowAccuracyFirstFix = !hasReliableFix && !lastSyncedLocationPayload;
+  if ((hasReliableFix && hasLocationChangedSignificantly(locationPayload, lastSyncedLocationPayload)) || shouldSyncLowAccuracyFirstFix) {
     lastSyncedLocationPayload = locationPayload;
     await syncSessionLocation(locationPayload);
   }
@@ -2409,7 +2431,7 @@ function startLocationWatch() {
     {
       enableHighAccuracy: true,
       timeout: 30000,
-      maximumAge: 10000, // Allow positions up to 10 seconds old for watch
+      maximumAge: 3000, // Prefer fresher points to reduce stale jumps.
     }
   );
 }
@@ -2450,7 +2472,10 @@ async function getUserLocation() {
       console.log('Geolocation error:', error);
       currentUserLocation = formatGeoErrorMessage(error);
       updateProfileUI();
-      await syncSessionLocation(null, { heartbeat: true });
+      const usedCachedLocation = await applyCachedLocationFallback(error);
+      if (!usedCachedLocation) {
+        await syncSessionLocation(null, { heartbeat: true });
+      }
       if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
     },
     {

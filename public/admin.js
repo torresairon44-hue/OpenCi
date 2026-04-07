@@ -586,6 +586,48 @@ function getStatusLabel(statusValue) {
   return 'INACTIVE';
 }
 
+function getLocationSourceQuality(sourceValue) {
+  const source = String(sourceValue || '').toLowerCase();
+
+  if (source === 'browser-gps' || source === 'browser-gps-watch' || source === 'admin-fieldman-map') {
+    return {
+      label: 'GPS',
+      className: 'is-gps',
+      description: 'Device GPS fix',
+    };
+  }
+
+  if (source === 'cached-location') {
+    return {
+      label: 'CACHED',
+      className: 'is-cached',
+      description: 'Last known device location',
+    };
+  }
+
+  if (source === 'ip-approx') {
+    return {
+      label: 'APPROX',
+      className: 'is-approx',
+      description: 'IP-based approximate location',
+    };
+  }
+
+  if (source === 'legacy-string') {
+    return {
+      label: 'LEGACY',
+      className: 'is-legacy',
+      description: 'Legacy coordinate format',
+    };
+  }
+
+  return {
+    label: 'UNKNOWN',
+    className: 'is-unknown',
+    description: 'Unclassified location source',
+  };
+}
+
 function ensureFieldmanMap() {
   if (fieldmanMapInstance || !fieldmanLocationMap || !window.L) {
     return;
@@ -836,6 +878,7 @@ function renderFieldmanLocations(items, summary) {
       const popupRole = escapeHtml((item.role || 'fieldman').toUpperCase());
       const popupStatus = escapeHtml(getStatusLabel(status));
       const popupAddress = String(item.address || '').trim() || 'Address unavailable';
+      const sourceQuality = getLocationSourceQuality(item.source);
       const spoofingWarning = item.spoofingDetected
         ? `<br /><span style="color: #ff6b6b; font-weight: bold;">⚠️ SUSPICIOUS LOCATION</span>`
         : '';
@@ -848,6 +891,7 @@ function renderFieldmanLocations(items, summary) {
           <strong>${popupTitle}</strong><br />
           <span>${popupRole}</span><br />
           <span>Status: ${popupStatus}</span><br />
+          <span class="fieldman-chip fieldman-source-chip ${sourceQuality.className}" title="${escapeHtml(sourceQuality.description)}">Source: ${escapeHtml(sourceQuality.label)}</span><br />
           <span>Address: ${escapeHtml(popupAddress)}</span><br />
           <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
           ${spoofingWarning}
@@ -881,6 +925,7 @@ function renderFieldmanLocations(items, summary) {
           ? `${lat.toFixed(4)}, ${lng.toFixed(4)}`
           : 'No coordinates';
         const accuracyText = Number.isFinite(accuracy) ? `${accuracy.toFixed(1)}m` : 'n/a';
+        const sourceQuality = getLocationSourceQuality(item.source);
         const spoofingAlert = item.spoofingDetected
           ? '<span class="fieldman-chip is-spoofed" style="background-color: #ff6b6b; color: white;">⚠️ SUSPICIOUS</span>'
           : '';
@@ -894,6 +939,7 @@ function renderFieldmanLocations(items, summary) {
             <div class="fieldman-row-meta">
               <span class="fieldman-role-chip role-${role}">${role.toUpperCase()}</span>
               <span class="fieldman-chip is-${escapeHtml(status)}">${getStatusLabel(status)}</span>
+              <span class="fieldman-chip fieldman-source-chip ${sourceQuality.className}" title="${escapeHtml(sourceQuality.description)}">${escapeHtml(sourceQuality.label)}</span>
               ${spoofingAlert}
               <span>Accuracy: ${escapeHtml(accuracyText)}</span>
               <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
@@ -931,10 +977,18 @@ async function loadFieldmanLocations() {
     });
 
     if (!response.ok) {
-      if (response.status === 401 || response.status === 403) {
-        throw new Error('Admin authentication is required to view fieldman locations.');
+      let apiErrorMessage = '';
+      try {
+        const payload = await response.json();
+        apiErrorMessage = String(payload?.error || '').trim();
+      } catch (_error) {
+        apiErrorMessage = '';
       }
-      throw new Error('Failed to load fieldman locations.');
+
+      if (response.status === 401 || response.status === 403) {
+        throw new Error(apiErrorMessage || 'Admin authentication is required to view fieldman locations.');
+      }
+      throw new Error(apiErrorMessage || 'Failed to load fieldman locations.');
     }
 
     const payload = await response.json();

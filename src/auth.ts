@@ -37,6 +37,10 @@ const IS_PRODUCTION = (process.env.NODE_ENV || 'development') === 'production';
 const AVATAR_STORAGE_BACKEND = String(process.env.AVATAR_STORAGE_BACKEND || 'auto').trim().toLowerCase();
 const ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION = process.env.ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION === 'true';
 const BLOB_STORAGE_HOST_SUFFIX = '.public.blob.vercel-storage.com';
+const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter((value) => value.length > 0);
 
 export const authRouter = Router();
 
@@ -134,9 +138,8 @@ function buildAvatarPayload(customAvatarUrl: string | null, larkAvatarUrl: strin
   larkUrl: string | null;
   source: 'custom' | 'lark' | 'default';
 } {
-  const custom = normalizeUrlOrNull(customAvatarUrl);
-  const normalizedLark = normalizeUrlOrNull(larkAvatarUrl);
-  const lark = isManagedProfileAvatarPath(normalizedLark) ? normalizedLark : null;
+  const custom = toManagedAvatarUrlOrNull(customAvatarUrl);
+  const lark = toManagedAvatarUrlOrNull(larkAvatarUrl);
   return {
     effectiveUrl: custom || lark || null,
     customUrl: custom,
@@ -194,6 +197,25 @@ function isManagedProfileAvatarPath(value: string | null | undefined): boolean {
     return normalized.startsWith(getManagedProfileAvatarPrefix());
   }
   return isManagedBlobAvatarUrl(normalized);
+}
+
+function toManagedAvatarUrlOrNull(value: unknown): string | null {
+  const normalized = normalizeUrlOrNull(value);
+  if (!normalized) return null;
+  return isManagedProfileAvatarPath(normalized) ? normalized : null;
+}
+
+function isAllowedLarkAvatarHost(remoteUrl: string): boolean {
+  try {
+    const parsed = new URL(remoteUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return LARK_AVATAR_ALLOWED_HOST_SUFFIXES.some((suffix) => {
+      if (!suffix) return false;
+      return hostname === suffix || hostname.endsWith(`.${suffix}`);
+    });
+  } catch {
+    return false;
+  }
 }
 
 function ensureProfileUploadDir(): string {
@@ -287,6 +309,11 @@ async function persistManagedAvatar(
 async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | null): Promise<string | null> {
   const normalizedRemoteUrl = normalizeUrlOrNull(remoteUrl);
   if (!normalizedRemoteUrl || normalizedRemoteUrl.startsWith('/')) {
+    return null;
+  }
+
+  if (!isAllowedLarkAvatarHost(normalizedRemoteUrl)) {
+    console.warn(`[AUTH AVATAR] Rejected Lark avatar host for user ${userId}`);
     return null;
   }
 
@@ -384,8 +411,8 @@ async function syncTokenRoleFromDatabase(res: Response, payload: any): Promise<a
       email: resolvedUser.email || payload.email || null,
       role: dbRole,
       larkId: resolvedUser.lark_id || payload.larkId,
-      larkAvatarUrl: normalizeUrlOrNull(resolvedUser.lark_avatar_url),
-      customAvatarUrl: normalizeUrlOrNull(resolvedUser.custom_avatar_url),
+      larkAvatarUrl: toManagedAvatarUrlOrNull(resolvedUser.lark_avatar_url),
+      customAvatarUrl: toManagedAvatarUrlOrNull(resolvedUser.custom_avatar_url),
       larkTenant: payload.larkTenant,
       sessionId: reboundByLarkId ? undefined : payload.sessionId,
     };
@@ -528,6 +555,11 @@ function normalizeSessionDevice(rawDevice: any, fallbackUserAgent?: string): Nor
 const MAX_USER_LOCATION_HISTORY = 10;
 const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane speed)
 const LOCATION_HISTORY_RETENTION_MS = 30 * 60 * 1000; // 30 minutes
+const WEAK_LOCATION_ACCURACY_THRESHOLD_METERS = 120;
+const REJECT_LOCATION_ACCURACY_THRESHOLD_METERS = 1200;
+const WEAK_LOCATION_PROMOTION_DISTANCE_METERS = 150;
+const WEAK_LOCATION_PROMOTION_LOOKBACK_MS = 10 * 60 * 1000;
+const REJECTED_LOCATION_SOURCES = new Set(['ip-approx']);
 
 interface UserLocationEventRow {
   id: string;
@@ -683,7 +715,114 @@ interface NormalizedSessionLocationExtended extends NormalizedSessionLocation {
   confidence?: number;
 }
 
-async function normalizeSessionLocation(rawLocation: any, userId?: string): Promise<{ value?: NormalizedSessionLocationExtended; error?: string }> {
+function parseStoredSessionLocation(rawLocation: string | null | undefined): NormalizedSessionLocationExtended | null {
+  if (!rawLocation || typeof rawLocation !== 'string') {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(rawLocation);
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+
+    const latValue = Number((parsed as any).lat ?? (parsed as any).latitude);
+    const lngValue = Number((parsed as any).lng ?? (parsed as any).longitude);
+    if (!Number.isFinite(latValue) || !Number.isFinite(lngValue)) {
+      return null;
+    }
+
+    if (latValue < -90 || latValue > 90 || lngValue < -180 || lngValue > 180) {
+      return null;
+    }
+
+    const rawAccuracy = (parsed as any).accuracyMeters ?? (parsed as any).accuracy;
+    const parsedAccuracy = Number(rawAccuracy);
+    const accuracyMeters = Number.isFinite(parsedAccuracy) && parsedAccuracy >= 0 && parsedAccuracy <= 5000
+      ? Number(parsedAccuracy.toFixed(1))
+      : null;
+
+    const capturedAtRaw = String((parsed as any).capturedAt || '');
+    const capturedAtMs = Date.parse(capturedAtRaw);
+    const capturedAt = Number.isNaN(capturedAtMs)
+      ? new Date().toISOString()
+      : new Date(capturedAtMs).toISOString();
+
+    const source = typeof (parsed as any).source === 'string' && (parsed as any).source.trim().length > 0
+      ? (parsed as any).source.trim().toLowerCase().slice(0, 48)
+      : 'browser-gps';
+
+    const spoofingDetected = typeof (parsed as any).spoofingDetected === 'boolean'
+      ? Boolean((parsed as any).spoofingDetected)
+      : false;
+    const spoofingReason = typeof (parsed as any).spoofingReason === 'string'
+      ? (parsed as any).spoofingReason.slice(0, 220)
+      : null;
+    const confidenceRaw = Number((parsed as any).confidence);
+    const confidence = Number.isFinite(confidenceRaw)
+      ? Math.max(0, Math.min(1, confidenceRaw))
+      : 1;
+
+    return {
+      lat: Number(latValue.toFixed(6)),
+      lng: Number(lngValue.toFixed(6)),
+      accuracyMeters,
+      capturedAt,
+      source,
+      spoofingDetected,
+      spoofingReason,
+      confidence,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isReliableSessionLocationSample(location: NormalizedSessionLocationExtended | null | undefined): boolean {
+  if (!location) return false;
+  if (REJECTED_LOCATION_SOURCES.has(String(location.source || '').toLowerCase())) return false;
+  if (!Number.isFinite(location.accuracyMeters as number)) return false;
+  return Number(location.accuracyMeters) <= WEAK_LOCATION_ACCURACY_THRESHOLD_METERS;
+}
+
+async function hasConsistentWeakLocationCluster(
+  userId: string,
+  lat: number,
+  lng: number,
+  capturedAtMs: number
+): Promise<boolean> {
+  try {
+    const history = await getUserLocationHistory(userId);
+    let nearPointCount = 0;
+
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const entry = history[i];
+      const ageMs = capturedAtMs - entry.timestamp;
+      if (ageMs < 0) continue;
+      if (ageMs > WEAK_LOCATION_PROMOTION_LOOKBACK_MS) {
+        break;
+      }
+
+      const distanceMeters = calculateDistanceMeters(entry.lat, entry.lng, lat, lng);
+      if (distanceMeters <= WEAK_LOCATION_PROMOTION_DISTANCE_METERS) {
+        nearPointCount += 1;
+      }
+
+      if (nearPointCount >= 1) {
+        return true;
+      }
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function normalizeSessionLocation(
+  rawLocation: any,
+  options?: { userId?: string; previousLocation?: NormalizedSessionLocationExtended | null }
+): Promise<{ value?: NormalizedSessionLocationExtended; error?: string; ignoredReason?: string }> {
   if (rawLocation === undefined || rawLocation === null) {
     return {};
   }
@@ -722,14 +861,28 @@ async function normalizeSessionLocation(rawLocation: any, userId?: string): Prom
   }
 
   const source = typeof rawLocation.source === 'string' && rawLocation.source.trim().length > 0
-    ? rawLocation.source.trim().slice(0, 48)
+    ? rawLocation.source.trim().toLowerCase().slice(0, 48)
     : 'browser-gps';
   const capturedAtMs = Date.parse(capturedAt);
+  const userId = options?.userId;
+  const previousLocation = options?.previousLocation || null;
 
   // Server-side spoof detection
   let spoofingDetected = Boolean(rawLocation.spoofingDetected);
   let spoofingReason = rawLocation.spoofingReason || null;
   let confidence = 1.0;
+
+  if (REJECTED_LOCATION_SOURCES.has(source)) {
+    if (previousLocation) {
+      return {
+        value: previousLocation,
+        ignoredReason: `Rejected low-trust source: ${source}`,
+      };
+    }
+    return {
+      ignoredReason: `Rejected low-trust source: ${source}`,
+    };
+  }
 
   if (userId) {
     const serverSpoofCheck = await detectServerSideSpoofing(userId, latValue, lngValue, capturedAtMs);
@@ -741,6 +894,42 @@ async function normalizeSessionLocation(rawLocation: any, userId?: string): Prom
 
     // Add to history for future checks
     await addToUserLocationHistory(userId, latValue, lngValue, capturedAtMs);
+  }
+
+  if (previousLocation && isReliableSessionLocationSample(previousLocation)) {
+    const incomingAccuracy = Number(accuracyMeters);
+    const hasIncomingAccuracy = Number.isFinite(incomingAccuracy);
+    const distanceFromPrevious = calculateDistanceMeters(previousLocation.lat, previousLocation.lng, latValue, lngValue);
+
+    if (spoofingDetected) {
+      return {
+        value: previousLocation,
+        ignoredReason: 'Preserved previous reliable location due to spoofing signal.',
+      };
+    }
+
+    if (hasIncomingAccuracy && incomingAccuracy > REJECT_LOCATION_ACCURACY_THRESHOLD_METERS) {
+      return {
+        value: previousLocation,
+        ignoredReason: `Preserved previous reliable location due to very low accuracy (${Math.round(incomingAccuracy)}m).`,
+      };
+    }
+
+    if (hasIncomingAccuracy && incomingAccuracy > WEAK_LOCATION_ACCURACY_THRESHOLD_METERS) {
+      const hasConsistency = userId
+        ? await hasConsistentWeakLocationCluster(userId, latValue, lngValue, capturedAtMs)
+        : false;
+      const canPromoteWeakSample = distanceFromPrevious <= WEAK_LOCATION_PROMOTION_DISTANCE_METERS || hasConsistency;
+
+      if (!canPromoteWeakSample) {
+        return {
+          value: previousLocation,
+          ignoredReason: `Preserved previous reliable location while waiting for consistent weak-signal fixes (${Math.round(incomingAccuracy)}m).`,
+        };
+      }
+
+      confidence = Math.min(confidence, 0.72);
+    }
   }
 
   return {
@@ -884,7 +1073,7 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
     }
 
     const managedLarkAvatarUrl = await cacheLarkAvatarToManagedPath(userId, larkAvatarUrl);
-    const effectiveLarkAvatarUrl = managedLarkAvatarUrl || previousManagedLarkAvatarUrl || null;
+    const effectiveLarkAvatarUrl = toManagedAvatarUrlOrNull(managedLarkAvatarUrl || previousManagedLarkAvatarUrl || null);
 
     if (existing.length > 0) {
       if (firstAdminIdentity && role !== 'admin') {
@@ -1010,10 +1199,11 @@ authRouter.post('/profile/photo', requireAuth, (req: Request, res: Response) => 
         return;
       }
 
-      const previousCustomAvatarUrl = normalizeUrlOrNull(userRows[0].custom_avatar_url);
-      const larkAvatarUrl = normalizeUrlOrNull(userRows[0].lark_avatar_url);
+      const previousCustomAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].custom_avatar_url);
+      const larkAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].lark_avatar_url);
 
-      const customAvatarUrl = await persistManagedAvatar(userId, 'custom', file.buffer, file.mimetype);
+      const uploadedCustomAvatarUrl = await persistManagedAvatar(userId, 'custom', file.buffer, file.mimetype);
+      const customAvatarUrl = toManagedAvatarUrlOrNull(uploadedCustomAvatarUrl);
       if (!customAvatarUrl) {
         res.status(503).json({ error: 'Avatar storage is currently unavailable. Please try again later.' });
         return;
@@ -1063,8 +1253,8 @@ authRouter.delete('/profile/photo', requireAuth, async (req: Request, res: Respo
       return;
     }
 
-    const previousCustomAvatarUrl = normalizeUrlOrNull(userRows[0].custom_avatar_url);
-    const larkAvatarUrl = normalizeUrlOrNull(userRows[0].lark_avatar_url);
+    const previousCustomAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].custom_avatar_url);
+    const larkAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].lark_avatar_url);
 
     await executeQuery(
       `UPDATE users SET custom_avatar_url = NULL, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -1221,13 +1411,16 @@ authRouter.post('/session/update', async (req: Request, res: Response) => {
   }
 
   try {
-    const existingSessionRows = await runQuery<{ stop_time: string | null }>(
-      `SELECT stop_time FROM user_sessions WHERE session_id = ?`,
+    const existingSessionRows = await runQuery<{ stop_time: string | null; location: string | null }>(
+      `SELECT stop_time, location FROM user_sessions WHERE session_id = ?`,
       [payload.sessionId]
     );
 
     const currentSessionStopped = existingSessionRows.length > 0 && Boolean(existingSessionRows[0].stop_time);
     const currentSessionMissing = existingSessionRows.length === 0;
+    let previousSessionLocation = !currentSessionMissing && !currentSessionStopped
+      ? parseStoredSessionLocation(existingSessionRows[0].location)
+      : null;
 
     if (currentSessionMissing || currentSessionStopped) {
       const renewedSessionId = await createSessionForPayloadOrRespond(res, payload);
@@ -1248,13 +1441,21 @@ authRouter.post('/session/update', async (req: Request, res: Response) => {
       });
       setAuthCookie(res, renewedToken);
       payload.sessionId = renewedSessionId;
+      previousSessionLocation = null;
     }
 
     const { location, battery, device } = req.body;
-    const normalizedLocation = await normalizeSessionLocation(location, payload.userId);
+    const normalizedLocation = await normalizeSessionLocation(location, {
+      userId: payload.userId,
+      previousLocation: previousSessionLocation,
+    });
     if (normalizedLocation.error) {
       res.status(400).json({ error: normalizedLocation.error });
       return;
+    }
+
+    if (normalizedLocation.ignoredReason) {
+      console.log(`[LOCATION INFO] User ${payload.userId} (${payload.name}): ${normalizedLocation.ignoredReason}`);
     }
     
     // Log spoofing detection for monitoring

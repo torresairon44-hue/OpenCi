@@ -318,8 +318,8 @@ async function buildFieldmanLocationsPayload(): Promise<FieldmanLocationsPayload
     }
   );
 
-  const latestByUser = getLatestSessionByUser(sessions);
   const nowMs = Date.now();
+  const latestByUser = getLatestSessionByUser(sessions, nowMs);
   const bestAccessSessionByUser = getBestAccessSessionByUser(sessions, nowMs);
   let excludedOutOfPhilippinesCount = 0;
 
@@ -525,8 +525,51 @@ function isInPhilippines(lat: number, lng: number): boolean {
   return true;
 }
 
-function getLatestSessionByUser(rows: SessionRow[]): Map<string, { sessionId: string; location: ParsedSessionLocation; updatedAtMs: number }> {
-  const latestByUser = new Map<string, { sessionId: string; location: ParsedSessionLocation; updatedAtMs: number }>();
+function getLocationSourceScore(source: string): number {
+  const normalized = String(source || '').toLowerCase();
+  if (normalized === 'browser-gps-watch' || normalized === 'browser-gps') return 1;
+  if (normalized === 'admin-fieldman-map') return 0.92;
+  if (normalized === 'cached-location') return 0.45;
+  if (normalized === 'ip-approx') return 0.2;
+  if (normalized === 'legacy-string') return 0.6;
+  return 0.7;
+}
+
+function getLocationAccuracyScore(accuracyMeters: number | null): number {
+  if (!Number.isFinite(accuracyMeters as number)) return 0.65;
+  const accuracy = Number(accuracyMeters);
+  if (accuracy <= 30) return 1;
+  if (accuracy <= 80) return 0.9;
+  if (accuracy <= 200) return 0.75;
+  if (accuracy <= 600) return 0.55;
+  if (accuracy <= 1200) return 0.35;
+  return 0.15;
+}
+
+function getLocationQualityScore(location: ParsedSessionLocation): number {
+  const sourceScore = getLocationSourceScore(location.source);
+  const accuracyScore = getLocationAccuracyScore(location.accuracyMeters);
+  const confidenceScore = Number.isFinite(location.confidence as number)
+    ? Math.max(0, Math.min(1, Number(location.confidence)))
+    : 1;
+  const spoofPenalty = location.spoofingDetected ? 0.25 : 1;
+  return Number(((sourceScore * 0.4 + accuracyScore * 0.4 + confidenceScore * 0.2) * spoofPenalty).toFixed(4));
+}
+
+function getLocationSelectionScore(location: ParsedSessionLocation, sampleMs: number, nowMs: number): number {
+  const ageMs = Math.max(0, nowMs - sampleMs);
+  const recencyScore = Math.max(0, 1 - (ageMs / (2 * 60 * 60 * 1000)));
+  let score = recencyScore * 0.62 + getLocationQualityScore(location) * 0.38;
+
+  if (String(location.source || '').toLowerCase() === 'ip-approx') {
+    score *= 0.7;
+  }
+
+  return Number(score.toFixed(4));
+}
+
+function getLatestSessionByUser(rows: SessionRow[], nowMs: number): Map<string, { sessionId: string; location: ParsedSessionLocation; updatedAtMs: number }> {
+  const latestByUser = new Map<string, { sessionId: string; location: ParsedSessionLocation; updatedAtMs: number; selectionScore: number }>();
 
   rows.forEach((row) => {
     const parsedLocation = parseSessionLocation(row.location, row.updated_at);
@@ -538,17 +581,31 @@ function getLatestSessionByUser(rows: SessionRow[]): Map<string, { sessionId: st
     const updatedMs = parseTimestamp(row.updated_at);
     const score = Math.max(capturedMs, updatedMs);
 
+    const selectionScore = getLocationSelectionScore(parsedLocation, score, nowMs);
     const existing = latestByUser.get(row.user_id);
-    if (!existing || score > existing.updatedAtMs) {
+    if (
+      !existing ||
+      selectionScore > (existing.selectionScore + 0.015) ||
+      (Math.abs(selectionScore - existing.selectionScore) <= 0.015 && score > existing.updatedAtMs)
+    ) {
       latestByUser.set(row.user_id, {
         sessionId: row.session_id,
         location: parsedLocation,
         updatedAtMs: score,
+        selectionScore,
       });
     }
   });
 
-  return latestByUser;
+  const result = new Map<string, { sessionId: string; location: ParsedSessionLocation; updatedAtMs: number }>();
+  latestByUser.forEach((value, key) => {
+    result.set(key, {
+      sessionId: value.sessionId,
+      location: value.location,
+      updatedAtMs: value.updatedAtMs,
+    });
+  });
+  return result;
 }
 
 function getSessionScore(row: SessionRow): number {
@@ -956,7 +1013,7 @@ adminApprovalsRouter.delete('/admin/users/:id', requireAuth, requireAdmin, requi
   });
 });
 
-adminApprovalsRouter.get('/admin/dashboard/summary', requireAuth, requireAdmin, async (_req: Request, res: Response) => {
+adminApprovalsRouter.get('/admin/dashboard/summary', requireAuth, requireAdmin, requireMainAdmin, async (_req: Request, res: Response) => {
   const users = await runQuery<DashboardUserRow>(`SELECT id, role, lark_id FROM users`);
   const larkUsers = users.filter((user) => Boolean((user.lark_id || '').trim()));
 
@@ -972,8 +1029,8 @@ adminApprovalsRouter.get('/admin/dashboard/summary', requireAuth, requireAdmin, 
   const allSessions = await runQuery<SessionRow>(
     `SELECT user_id, session_id, location, start_time, updated_at, stop_time FROM user_sessions`
   );
-  const latestByUser = getLatestSessionByUser(allSessions);
   const nowMs = Date.now();
+  const latestByUser = getLatestSessionByUser(allSessions, nowMs);
   const bestAccessSessionByUser = getBestAccessSessionByUser(allSessions, nowMs);
 
   const onlineLarkUsers = larkUsers.filter((user) => {
@@ -1025,7 +1082,7 @@ adminApprovalsRouter.get('/admin/dashboard/summary', requireAuth, requireAdmin, 
   });
 });
 
-adminApprovalsRouter.get('/admin/fieldman-locations', requireAuth, requireAdmin, async (_req: Request, res: Response) => {
+adminApprovalsRouter.get('/admin/fieldman-locations', requireAuth, requireAdmin, requireMainAdmin, async (_req: Request, res: Response) => {
   const payload = await buildFieldmanLocationsPayload();
 
   res.json({
