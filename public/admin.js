@@ -522,10 +522,22 @@ function requestGeolocationAccess() {
 
     navigator.geolocation.getCurrentPosition(
       async (position) => {
+        const reportedAccuracy = Number(position.coords.accuracy);
+        const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
+          ? Number(reportedAccuracy.toFixed(1))
+          : null;
+        const hasUsableFix = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= 300;
+
+        if (!hasUsableFix) {
+          await syncFieldmanSessionLocation(null, { heartbeat: true });
+          resolve(true);
+          return;
+        }
+
         const locationPayload = {
           lat: Number(position.coords.latitude),
           lng: Number(position.coords.longitude),
-          accuracyMeters: Number.isFinite(position.coords.accuracy) ? Number(position.coords.accuracy) : null,
+          accuracyMeters,
           capturedAt: new Date().toISOString(),
           source: 'admin-fieldman-map',
         };
