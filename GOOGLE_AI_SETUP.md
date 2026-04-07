@@ -8,7 +8,7 @@ The chatbot is running in **fallback mode** with demo responses because the Goog
 ### Step 1: Verify Your API Key
 Your current API key in `.env`:
 ```
-GOOGLE_AI_API_KEY=AIzaSyAiZLekNjrhfcFA5K6GoJEIuSo2kyuVwPA
+GOOGLE_AI_API_KEY=your_google_ai_api_key_here
 ```
 
 ### Step 2: Check Available Models
