@@ -32,6 +32,7 @@ let aiServiceBlockReason = '';
 let sessionHeartbeatTimer = null;
 let locationWatchId = null; // For continuous GPS tracking
 let lastSyncedLocationPayload = null; // Track last synced location to avoid redundant updates
+let shouldResetLocationOnNextSync = false;
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -330,6 +331,10 @@ async function checkAuthSession() {
     if (data.loggedIn) {
       isLoggedIn = true;
       currentUserId = data.userId;
+      shouldResetLocationOnNextSync = true;
+      lastSyncedLocationPayload = null;
+      locationHistory.length = 0;
+      localStorage.removeItem(LOCATION_CACHE_KEY);
       currentUserName = data.name || 'User';
       currentUserRole = data.role
         ? data.role.charAt(0).toUpperCase() + data.role.slice(1)
@@ -352,6 +357,9 @@ async function checkAuthSession() {
     } else {
       isLoggedIn = false;
       currentUserId = null;
+      shouldResetLocationOnNextSync = false;
+      lastSyncedLocationPayload = null;
+      locationHistory.length = 0;
       currentUserRole = 'Identifying...';
       currentUserLarkAvatarUrl = null;
       currentUserCustomAvatarUrl = null;
@@ -368,6 +376,9 @@ async function checkAuthSession() {
     console.warn('Auth session check failed:', e);
     isLoggedIn = false;
     currentUserId = null;
+    shouldResetLocationOnNextSync = false;
+    lastSyncedLocationPayload = null;
+    locationHistory.length = 0;
     currentUserRole = 'Identifying...';
     currentUserLarkAvatarUrl = null;
     currentUserCustomAvatarUrl = null;
@@ -618,6 +629,9 @@ function setupEventListeners() {
       updateProfileUI();
       stopSessionHeartbeat();
       lastSyncedLocationPayload = null;
+      shouldResetLocationOnNextSync = false;
+      locationHistory.length = 0;
+      localStorage.removeItem(LOCATION_CACHE_KEY);
       await startNewChat();
     });
   }
@@ -2027,8 +2041,13 @@ async function syncSessionLocation(locationPayload = null, options = {}) {
         location: locationPayload || undefined,
         device: detectClientDeviceInfo(),
         heartbeat: shouldHeartbeat,
+        resetLocation: shouldResetLocationOnNextSync || undefined,
       }),
     });
+
+    if (response.ok) {
+      shouldResetLocationOnNextSync = false;
+    }
 
     if (!response.ok && response.status !== 401 && response.status !== 403) {
       const payload = await response.json().catch(() => ({}));
@@ -2239,8 +2258,8 @@ function hasLocationChangedSignificantly(newPayload, oldPayload) {
 const locationHistory = [];
 const MAX_LOCATION_HISTORY = 10;
 const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane)
-const MIN_ACCURACY_THRESHOLD = 500; // Warn if accuracy > 500m
-const MAX_SYNC_ACCURACY_METERS = 1200; // Keep noisy readings from overriding known stable coordinates.
+const MIN_ACCURACY_THRESHOLD = 120; // Warn if accuracy is weak for same-site tracking.
+const MAX_SYNC_ACCURACY_METERS = 300; // Reject coarse fixes to improve same-building precision.
 const MIN_SIGNIFICANT_MOVE_METERS = 25;
 
 /**
@@ -2311,7 +2330,7 @@ async function processGeoPosition(position, source = 'browser-gps') {
   const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
     ? Number(reportedAccuracy.toFixed(1))
     : null;
-  const hasReliableFix = !Number.isFinite(accuracyMeters) || Number(accuracyMeters) <= MAX_SYNC_ACCURACY_METERS;
+  const hasReliableFix = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= MAX_SYNC_ACCURACY_METERS;
   
   // Anti-spoofing: Check for unrealistic movement
   const spoofCheck = detectLocationSpoofing(latitude, longitude, Date.now());
@@ -2348,8 +2367,7 @@ async function processGeoPosition(position, source = 'browser-gps') {
   }
   
   // Keep existing stable GPS fix if the new reading is too noisy.
-  const shouldSyncLowAccuracyFirstFix = !hasReliableFix && !lastSyncedLocationPayload;
-  if ((hasReliableFix && hasLocationChangedSignificantly(locationPayload, lastSyncedLocationPayload)) || shouldSyncLowAccuracyFirstFix) {
+  if (hasReliableFix && hasLocationChangedSignificantly(locationPayload, lastSyncedLocationPayload)) {
     lastSyncedLocationPayload = locationPayload;
     await syncSessionLocation(locationPayload);
   }

@@ -578,8 +578,8 @@ function normalizeSessionDevice(rawDevice: any, fallbackUserAgent?: string): Nor
 const MAX_USER_LOCATION_HISTORY = 10;
 const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane speed)
 const LOCATION_HISTORY_RETENTION_MS = 30 * 60 * 1000; // 30 minutes
-const WEAK_LOCATION_ACCURACY_THRESHOLD_METERS = 120;
-const REJECT_LOCATION_ACCURACY_THRESHOLD_METERS = 1200;
+const WEAK_LOCATION_ACCURACY_THRESHOLD_METERS = 80;
+const REJECT_LOCATION_ACCURACY_THRESHOLD_METERS = 300;
 const WEAK_LOCATION_PROMOTION_DISTANCE_METERS = 150;
 const WEAK_LOCATION_PROMOTION_LOOKBACK_MS = 10 * 60 * 1000;
 const REJECTED_LOCATION_SOURCES = new Set(['ip-approx']);
@@ -907,6 +907,32 @@ async function normalizeSessionLocation(
     };
   }
 
+  const incomingAccuracy = Number(accuracyMeters);
+  const hasIncomingAccuracy = Number.isFinite(incomingAccuracy);
+  if (!hasIncomingAccuracy) {
+    if (previousLocation) {
+      return {
+        value: previousLocation,
+        ignoredReason: 'Preserved previous location due to missing accuracy metadata.',
+      };
+    }
+    return {
+      ignoredReason: 'Ignored location sample without accuracy metadata.',
+    };
+  }
+
+  if (incomingAccuracy > REJECT_LOCATION_ACCURACY_THRESHOLD_METERS) {
+    if (previousLocation) {
+      return {
+        value: previousLocation,
+        ignoredReason: `Preserved previous location due to very low accuracy (${Math.round(incomingAccuracy)}m).`,
+      };
+    }
+    return {
+      ignoredReason: `Ignored very low-accuracy location sample (${Math.round(incomingAccuracy)}m).`,
+    };
+  }
+
   if (userId) {
     const serverSpoofCheck = await detectServerSideSpoofing(userId, latValue, lngValue, capturedAtMs);
     if (serverSpoofCheck.spoofed) {
@@ -920,8 +946,6 @@ async function normalizeSessionLocation(
   }
 
   if (previousLocation && isReliableSessionLocationSample(previousLocation)) {
-    const incomingAccuracy = Number(accuracyMeters);
-    const hasIncomingAccuracy = Number.isFinite(incomingAccuracy);
     const distanceFromPrevious = calculateDistanceMeters(previousLocation.lat, previousLocation.lng, latValue, lngValue);
 
     if (spoofingDetected) {
@@ -1356,7 +1380,20 @@ authRouter.post('/session/update', async (req: Request, res: Response) => {
       previousSessionLocation = null;
     }
 
-    const { location, battery, device } = req.body;
+    const { location, battery, device, resetLocation } = req.body;
+
+    if (resetLocation === true) {
+      await executeQuery(
+        `UPDATE user_sessions SET location = NULL, updated_at = CURRENT_TIMESTAMP WHERE session_id = ?`,
+        [payload.sessionId]
+      );
+      await executeQuery(
+        `DELETE FROM user_location_events WHERE user_id = ?`,
+        [payload.userId]
+      );
+      previousSessionLocation = null;
+    }
+
     const normalizedLocation = await normalizeSessionLocation(location, {
       userId: payload.userId,
       previousLocation: previousSessionLocation,
