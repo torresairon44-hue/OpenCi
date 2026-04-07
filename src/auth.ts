@@ -126,8 +126,7 @@ function pickLarkAvatarUrl(larkUser: any): string | null {
   return null;
 }
 
-function resolveAvatarSource(customAvatarUrl: string | null, larkAvatarUrl: string | null): 'custom' | 'lark' | 'default' {
-  if (customAvatarUrl) return 'custom';
+function resolveAvatarSource(_customAvatarUrl: string | null, larkAvatarUrl: string | null): 'lark' | 'default' {
   if (larkAvatarUrl) return 'lark';
   return 'default';
 }
@@ -136,13 +135,13 @@ function buildAvatarPayload(customAvatarUrl: string | null, larkAvatarUrl: strin
   effectiveUrl: string | null;
   customUrl: string | null;
   larkUrl: string | null;
-  source: 'custom' | 'lark' | 'default';
+  source: 'lark' | 'default';
 } {
-  const custom = toManagedAvatarUrlOrNull(customAvatarUrl);
-  const lark = toManagedAvatarUrlOrNull(larkAvatarUrl);
+  const custom = null;
+  const lark = toTrustedLarkAvatarUrlOrNull(larkAvatarUrl);
   return {
-    effectiveUrl: custom || lark || null,
-    customUrl: custom,
+    effectiveUrl: lark || null,
+    customUrl: null,
     larkUrl: lark,
     source: resolveAvatarSource(custom, lark),
   };
@@ -203,6 +202,30 @@ function toManagedAvatarUrlOrNull(value: unknown): string | null {
   const normalized = normalizeUrlOrNull(value);
   if (!normalized) return null;
   return isManagedProfileAvatarPath(normalized) ? normalized : null;
+}
+
+function toTrustedLarkAvatarUrlOrNull(value: unknown): string | null {
+  const normalized = normalizeUrlOrNull(value);
+  if (!normalized) return null;
+
+  if (isManagedProfileAvatarPath(normalized)) {
+    return normalized;
+  }
+
+  if (normalized.startsWith('/')) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== 'https:') {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return isAllowedLarkAvatarHost(normalized) ? normalized : null;
 }
 
 function isAllowedLarkAvatarHost(remoteUrl: string): boolean {
@@ -411,8 +434,8 @@ async function syncTokenRoleFromDatabase(res: Response, payload: any): Promise<a
       email: resolvedUser.email || payload.email || null,
       role: dbRole,
       larkId: resolvedUser.lark_id || payload.larkId,
-      larkAvatarUrl: toManagedAvatarUrlOrNull(resolvedUser.lark_avatar_url),
-      customAvatarUrl: toManagedAvatarUrlOrNull(resolvedUser.custom_avatar_url),
+      larkAvatarUrl: toTrustedLarkAvatarUrlOrNull(resolvedUser.lark_avatar_url),
+      customAvatarUrl: null,
       larkTenant: payload.larkTenant,
       sessionId: reboundByLarkId ? undefined : payload.sessionId,
     };
@@ -1060,6 +1083,7 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
     let userId: string;
     let role: string;
     const previousStoredLarkAvatarUrl = existing.length > 0 ? normalizeUrlOrNull(existing[0].lark_avatar_url) : null;
+    const previousTrustedLarkAvatarUrl = toTrustedLarkAvatarUrlOrNull(previousStoredLarkAvatarUrl);
     const previousManagedLarkAvatarUrl = isManagedProfileAvatarPath(previousStoredLarkAvatarUrl)
       ? previousStoredLarkAvatarUrl
       : null;
@@ -1073,7 +1097,9 @@ authRouter.get('/lark/callback', async (req: Request, res: Response) => {
     }
 
     const managedLarkAvatarUrl = await cacheLarkAvatarToManagedPath(userId, larkAvatarUrl);
-    const effectiveLarkAvatarUrl = toManagedAvatarUrlOrNull(managedLarkAvatarUrl || previousManagedLarkAvatarUrl || null);
+    const effectiveLarkAvatarUrl = toTrustedLarkAvatarUrlOrNull(
+      managedLarkAvatarUrl || larkAvatarUrl || previousTrustedLarkAvatarUrl || null
+    );
 
     if (existing.length > 0) {
       if (firstAdminIdentity && role !== 'admin') {
@@ -1153,126 +1179,12 @@ authRouter.get('/me', async (req: Request, res: Response) => {
   }
 });
 
-authRouter.post('/profile/photo', requireAuth, (req: Request, res: Response) => {
-  profilePhotoUpload.single('photo')(req, res, async (err: any) => {
-    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
-      res.status(400).json({ error: 'Profile photo is too large. Maximum size is 2MB.' });
-      return;
-    }
-
-    if (err instanceof multer.MulterError) {
-      res.status(400).json({ error: 'Invalid multipart profile photo payload.' });
-      return;
-    }
-
-    if (err) {
-      res.status(400).json({ error: err.message || 'Invalid profile photo upload payload' });
-      return;
-    }
-
-    try {
-      const user = (req as any).user;
-      const userId = String(user?.userId || '').trim();
-      if (!userId) {
-        res.status(401).json({ error: 'Authentication required' });
-        return;
-      }
-
-      const file = (req as any).file as Express.Multer.File | undefined;
-      if (!file) {
-        res.status(400).json({ error: 'Profile photo file is required.' });
-        return;
-      }
-
-      if (!hasValidImageSignature(file)) {
-        res.status(400).json({ error: 'Uploaded file content does not match declared image type.' });
-        return;
-      }
-
-      const userRows = await runQuery<{ lark_avatar_url: string | null; custom_avatar_url: string | null }>(
-        `SELECT lark_avatar_url, custom_avatar_url FROM users WHERE id = ?`,
-        [userId]
-      );
-
-      if (userRows.length === 0) {
-        res.status(404).json({ error: 'User not found' });
-        return;
-      }
-
-      const previousCustomAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].custom_avatar_url);
-      const larkAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].lark_avatar_url);
-
-      const uploadedCustomAvatarUrl = await persistManagedAvatar(userId, 'custom', file.buffer, file.mimetype);
-      const customAvatarUrl = toManagedAvatarUrlOrNull(uploadedCustomAvatarUrl);
-      if (!customAvatarUrl) {
-        res.status(503).json({ error: 'Avatar storage is currently unavailable. Please try again later.' });
-        return;
-      }
-
-      await executeQuery(
-        `UPDATE users SET custom_avatar_url = ?, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [customAvatarUrl, userId]
-      );
-
-      if (previousCustomAvatarUrl && previousCustomAvatarUrl !== customAvatarUrl) {
-        await deleteManagedProfileAvatarFile(previousCustomAvatarUrl);
-      }
-
-      res.json({
-        success: true,
-        avatar: buildAvatarPayload(customAvatarUrl, larkAvatarUrl),
-      });
-    } catch (error) {
-      console.error('Profile photo upload error:', error);
-      const message = String((error as any)?.message || '');
-      if (/filesystem avatar storage is disabled|BLOB_READ_WRITE_TOKEN is missing/i.test(message)) {
-        res.status(503).json({ error: 'Avatar upload requires durable Blob storage configuration in production.' });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to upload profile photo' });
-    }
-  });
+authRouter.post('/profile/photo', requireAuth, (_req: Request, res: Response) => {
+  res.status(403).json({ error: 'Custom profile photos are disabled. Lark profile photo is required.' });
 });
 
-authRouter.delete('/profile/photo', requireAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    const userId = String(user?.userId || '').trim();
-    if (!userId) {
-      res.status(401).json({ error: 'Authentication required' });
-      return;
-    }
-
-    const userRows = await runQuery<{ lark_avatar_url: string | null; custom_avatar_url: string | null }>(
-      `SELECT lark_avatar_url, custom_avatar_url FROM users WHERE id = ?`,
-      [userId]
-    );
-
-    if (userRows.length === 0) {
-      res.status(404).json({ error: 'User not found' });
-      return;
-    }
-
-    const previousCustomAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].custom_avatar_url);
-    const larkAvatarUrl = toManagedAvatarUrlOrNull(userRows[0].lark_avatar_url);
-
-    await executeQuery(
-      `UPDATE users SET custom_avatar_url = NULL, avatar_updated_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      [userId]
-    );
-
-    if (previousCustomAvatarUrl) {
-      await deleteManagedProfileAvatarFile(previousCustomAvatarUrl);
-    }
-
-    res.json({
-      success: true,
-      avatar: buildAvatarPayload(null, larkAvatarUrl),
-    });
-  } catch (error) {
-    console.error('Profile photo remove error:', error);
-    res.status(500).json({ error: 'Failed to remove profile photo' });
-  }
+authRouter.delete('/profile/photo', requireAuth, (_req: Request, res: Response) => {
+  res.status(403).json({ error: 'Custom profile photos are disabled. Lark profile photo is required.' });
 });
 
 // ─────────────────────────────────────────────────────────────

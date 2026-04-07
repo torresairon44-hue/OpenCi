@@ -66,6 +66,11 @@ const ACTIVE_WINDOW_MS = 5 * 60 * 1000;
 const RECENT_WINDOW_MS = 5 * 60 * 1000;
 const FIRST_ADMIN_OPEN_ID = process.env.FIRST_ADMIN_OPEN_ID || 'ou_d652030afb4a5cbe7d08f3cfdda685ad';
 const FIRST_ADMIN_TENANT_KEY = process.env.FIRST_ADMIN_TENANT_KEY || '12f9cd33134f1759';
+const BLOB_STORAGE_HOST_SUFFIX = '.public.blob.vercel-storage.com';
+const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter((value) => value.length > 0);
 
 const PHILIPPINES_BOUNDS = {
   minLat: 4.0,
@@ -291,8 +296,69 @@ function normalizeAvatarUrl(value: unknown): string | null {
   return null;
 }
 
+function isManagedAvatarUrl(value: string): boolean {
+  if (value.startsWith('/')) {
+    return value.startsWith('/uploads/profile/');
+  }
+
+  try {
+    const parsed = new URL(value);
+    const hostname = parsed.hostname.toLowerCase();
+    if (!hostname.endsWith(BLOB_STORAGE_HOST_SUFFIX)) {
+      return false;
+    }
+    return parsed.pathname.includes('/avatars/');
+  } catch {
+    return false;
+  }
+}
+
+function toManagedAvatarUrlOrNull(value: unknown): string | null {
+  const normalized = normalizeAvatarUrl(value);
+  if (!normalized) return null;
+  return isManagedAvatarUrl(normalized) ? normalized : null;
+}
+
+function isAllowedLarkAvatarHost(remoteUrl: string): boolean {
+  try {
+    const parsed = new URL(remoteUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    return LARK_AVATAR_ALLOWED_HOST_SUFFIXES.some((suffix) => {
+      if (!suffix) return false;
+      return hostname === suffix || hostname.endsWith(`.${suffix}`);
+    });
+  } catch {
+    return false;
+  }
+}
+
+function toTrustedLarkAvatarUrlOrNull(value: unknown): string | null {
+  const normalized = normalizeAvatarUrl(value);
+  if (!normalized) return null;
+
+  if (isManagedAvatarUrl(normalized)) {
+    return normalized;
+  }
+
+  if (normalized.startsWith('/')) {
+    return null;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.protocol !== 'https:') {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+
+  return isAllowedLarkAvatarHost(normalized) ? normalized : null;
+}
+
 function resolveEffectiveAvatarUrl(customAvatarUrl: unknown, larkAvatarUrl: unknown): string | null {
-  return normalizeAvatarUrl(customAvatarUrl) || normalizeAvatarUrl(larkAvatarUrl) || null;
+  void customAvatarUrl;
+  return toTrustedLarkAvatarUrlOrNull(larkAvatarUrl) || null;
 }
 
 function requireMainAdmin(req: Request, res: Response, next: NextFunction): void {

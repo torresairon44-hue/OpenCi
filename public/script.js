@@ -156,11 +156,10 @@ function normalizeAvatarUrl(value) {
 }
 
 function getEffectiveUserAvatarUrl() {
-  return normalizeAvatarUrl(currentUserCustomAvatarUrl) || normalizeAvatarUrl(currentUserLarkAvatarUrl) || null;
+  return normalizeAvatarUrl(currentUserLarkAvatarUrl) || null;
 }
 
 function getAvatarSourceLabel() {
-  if (currentUserAvatarSource === 'custom') return 'Custom profile photo';
   if (currentUserAvatarSource === 'lark') return 'Lark profile photo';
   return 'Default profile image';
 }
@@ -172,11 +171,7 @@ function persistAvatarState() {
     localStorage.removeItem(USER_AVATAR_LARK_KEY);
   }
 
-  if (currentUserCustomAvatarUrl) {
-    localStorage.setItem(USER_AVATAR_CUSTOM_KEY, currentUserCustomAvatarUrl);
-  } else {
-    localStorage.removeItem(USER_AVATAR_CUSTOM_KEY);
-  }
+  localStorage.removeItem(USER_AVATAR_CUSTOM_KEY);
 
   localStorage.setItem(USER_AVATAR_SOURCE_KEY, currentUserAvatarSource || 'default');
 }
@@ -189,20 +184,18 @@ function clearStoredAvatarState() {
 
 function loadAvatarStateFromStorage() {
   currentUserLarkAvatarUrl = normalizeAvatarUrl(localStorage.getItem(USER_AVATAR_LARK_KEY));
-  currentUserCustomAvatarUrl = normalizeAvatarUrl(localStorage.getItem(USER_AVATAR_CUSTOM_KEY));
+  currentUserCustomAvatarUrl = null;
   const source = String(localStorage.getItem(USER_AVATAR_SOURCE_KEY) || 'default').toLowerCase();
-  currentUserAvatarSource = source === 'custom' || source === 'lark' ? source : 'default';
+  currentUserAvatarSource = source === 'lark' ? 'lark' : 'default';
 }
 
 function applyAvatarPayload(avatarPayload) {
   currentUserLarkAvatarUrl = normalizeAvatarUrl(avatarPayload?.larkUrl);
-  currentUserCustomAvatarUrl = normalizeAvatarUrl(avatarPayload?.customUrl);
+  currentUserCustomAvatarUrl = null;
 
   const source = String(avatarPayload?.source || '').toLowerCase();
-  if (source === 'custom' || source === 'lark') {
+  if (source === 'lark') {
     currentUserAvatarSource = source;
-  } else if (currentUserCustomAvatarUrl) {
-    currentUserAvatarSource = 'custom';
   } else if (currentUserLarkAvatarUrl) {
     currentUserAvatarSource = 'lark';
   } else {
@@ -262,19 +255,17 @@ function renderUserAvatarUI() {
   }
 
   if (uploadProfilePhotoBtn) {
-    uploadProfilePhotoBtn.disabled = !isLoggedIn;
+    uploadProfilePhotoBtn.disabled = true;
   }
 
   if (removeProfilePhotoBtn) {
-    removeProfilePhotoBtn.disabled = !isLoggedIn || !currentUserCustomAvatarUrl;
+    removeProfilePhotoBtn.disabled = true;
   }
 
   if (!isLoggedIn) {
-    setProfilePhotoHelpText('Log in with Lark to upload a profile photo.');
-  } else if (pendingProfilePhotoFile) {
-    setProfilePhotoHelpText(`Selected: ${pendingProfilePhotoFile.name}. Click Save Settings to upload.`);
+    setProfilePhotoHelpText('Log in with Lark to use your Lark profile photo.');
   } else {
-    setProfilePhotoHelpText('Use PNG, JPG, or WEBP. Max file size: 2MB.');
+    setProfilePhotoHelpText('Profile photo is locked to your Lark account and cannot be changed here.');
   }
 }
 
@@ -668,33 +659,13 @@ function setupEventListeners() {
 
   if (uploadProfilePhotoBtn && profilePhotoInput) {
     uploadProfilePhotoBtn.addEventListener('click', () => {
-      if (!isLoggedIn) {
-        showFriendlyError('Login required', 'Please login with Lark before uploading a profile photo.');
-        return;
-      }
-      profilePhotoInput.click();
+      showFriendlyError('Lark-only profile photo', 'Profile photo is locked to your Lark account and cannot be changed.');
     });
 
     profilePhotoInput.addEventListener('change', (event) => {
       const input = event.target;
-      const file = input && input.files && input.files[0] ? input.files[0] : null;
-      if (!file) return;
-
-      if (!PROFILE_PHOTO_ALLOWED_TYPES.has(file.type)) {
-        showFriendlyError('Unsupported image type', 'Allowed types: PNG, JPEG, WEBP');
-        profilePhotoInput.value = '';
-        return;
-      }
-
-      if (file.size > PROFILE_PHOTO_MAX_BYTES) {
-        showFriendlyError('Image is too large', 'Maximum profile photo size is 2MB.');
-        profilePhotoInput.value = '';
-        return;
-      }
-
-      pendingProfilePhotoFile = file;
+      pendingProfilePhotoFile = null;
       revokePendingProfilePhotoPreview();
-      pendingProfilePhotoPreviewUrl = URL.createObjectURL(file);
       profilePhotoInput.value = '';
       renderUserAvatarUI();
     });
@@ -702,29 +673,7 @@ function setupEventListeners() {
 
   if (removeProfilePhotoBtn) {
     removeProfilePhotoBtn.addEventListener('click', async () => {
-      if (!isLoggedIn) {
-        showFriendlyError('Login required', 'Please login with Lark before removing a profile photo.');
-        return;
-      }
-
-      try {
-        const response = await fetch('/api/auth/profile/photo', {
-          method: 'DELETE',
-          credentials: 'include',
-        });
-
-        if (!response.ok) {
-          throw await buildHttpError(response);
-        }
-
-        const payload = await response.json();
-        applyAvatarPayload(payload.avatar || null);
-        pendingProfilePhotoFile = null;
-        revokePendingProfilePhotoPreview();
-        renderUserAvatarUI();
-      } catch (error) {
-        showFriendlyError('Failed to remove profile photo', String(error));
-      }
+      showFriendlyError('Lark-only profile photo', 'Profile photo is locked to your Lark account and cannot be changed.');
     });
   }
 
@@ -2522,34 +2471,9 @@ async function saveSettings() {
   }
 
   if (pendingProfilePhotoFile) {
-    if (!isLoggedIn) {
-      showFriendlyError('Login required', 'Please login with Lark before uploading a profile photo.');
-      return;
-    }
-
-    const formData = new FormData();
-    formData.append('photo', pendingProfilePhotoFile, pendingProfilePhotoFile.name);
-
-    try {
-      const response = await fetch('/api/auth/profile/photo', {
-        method: 'POST',
-        credentials: 'include',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw await buildHttpError(response);
-      }
-
-      const payload = await response.json();
-      applyAvatarPayload(payload.avatar || null);
-      pendingProfilePhotoFile = null;
-      revokePendingProfilePhotoPreview();
-      renderUserAvatarUI();
-    } catch (error) {
-      showFriendlyError('Failed to upload profile photo', String(error));
-      return;
-    }
+    pendingProfilePhotoFile = null;
+    revokePendingProfilePhotoPreview();
+    renderUserAvatarUI();
   }
 
   closeSettings();
