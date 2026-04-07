@@ -114,7 +114,7 @@ export async function testAllFeatures(
 
   // Test Option A: Concern Detection
   console.log('Test 1: Concern Detection (Option A)');
-  const { extractMainConcern } = await import('./openci-kb');
+  const { extractMainConcern } = await import('./openci-kb.js');
   const testQueries = [
     "Can't log into Lark",
     'DL workflow after visit',

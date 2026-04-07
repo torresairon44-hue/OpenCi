@@ -25,7 +25,7 @@ const FIRST_ADMIN_TENANT_KEY = process.env.FIRST_ADMIN_TENANT_KEY || '12f9cd3313
 let JWT_SECRET = process.env.JWT_SECRET as string;
 if (!JWT_SECRET || JWT_SECRET === 'change-this-secret-in-production') {
   console.error('⚠ JWT_SECRET is missing or using a placeholder. Using an in-memory fallback secret for this runtime.');
-  console.error('⚠ Set a strong JWT_SECRET in Railway Variables to avoid session invalidation on restart.');
+  console.error('⚠ Set a strong JWT_SECRET in your deployment environment variables to avoid session invalidation on restart.');
   JWT_SECRET = randomBytes(32).toString('hex');
 }
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
