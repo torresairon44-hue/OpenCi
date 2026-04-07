@@ -37,7 +37,7 @@ const IS_PRODUCTION = (process.env.NODE_ENV || 'development') === 'production';
 const AVATAR_STORAGE_BACKEND = String(process.env.AVATAR_STORAGE_BACKEND || 'auto').trim().toLowerCase();
 const ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION = process.env.ALLOW_FILESYSTEM_AVATAR_STORAGE_IN_PRODUCTION === 'true';
 const BLOB_STORAGE_HOST_SUFFIX = '.public.blob.vercel-storage.com';
-const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com')
+const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com,larkoffice.com,larkofficecdn.com,feishucdn.com,larkcdn.com')
   .split(',')
   .map((value) => value.trim().toLowerCase())
   .filter((value) => value.length > 0);
@@ -225,7 +225,7 @@ function toTrustedLarkAvatarUrlOrNull(value: unknown): string | null {
     return null;
   }
 
-  return isAllowedLarkAvatarHost(normalized) ? normalized : null;
+  return normalized;
 }
 
 function isAllowedLarkAvatarHost(remoteUrl: string): boolean {
@@ -335,8 +335,12 @@ async function cacheLarkAvatarToManagedPath(userId: string, remoteUrl: string | 
     return null;
   }
 
-  if (!isAllowedLarkAvatarHost(normalizedRemoteUrl)) {
-    console.warn(`[AUTH AVATAR] Rejected Lark avatar host for user ${userId}`);
+  try {
+    const parsed = new URL(normalizedRemoteUrl);
+    if (parsed.protocol !== 'https:') {
+      return null;
+    }
+  } catch {
     return null;
   }
 

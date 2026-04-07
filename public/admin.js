@@ -1066,6 +1066,7 @@ function closeApprovalActionMenus() {
   menuRoots.forEach((root) => {
     const toggleButton = root.querySelector('.approval-kebab-btn');
     const menu = root.querySelector('.approval-kebab-menu');
+    const itemRow = root.closest('.approval-item');
     if (menu instanceof HTMLElement) {
       menu.hidden = true;
     }
@@ -1073,12 +1074,16 @@ function closeApprovalActionMenus() {
       toggleButton.setAttribute('aria-expanded', 'false');
     }
     root.classList.remove('is-open');
+    if (itemRow instanceof HTMLElement) {
+      itemRow.classList.remove('is-menu-open');
+    }
   });
 }
 
 function toggleApprovalActionMenu(buttonElement) {
   const menuRoot = buttonElement.closest('.approval-kebab');
   if (!(menuRoot instanceof HTMLElement)) return;
+  const itemRow = menuRoot.closest('.approval-item');
 
   const menu = menuRoot.querySelector('.approval-kebab-menu');
   if (!(menu instanceof HTMLElement)) return;
@@ -1091,6 +1096,9 @@ function toggleApprovalActionMenu(buttonElement) {
   menuRoot.classList.add('is-open');
   menu.hidden = false;
   buttonElement.setAttribute('aria-expanded', 'true');
+  if (itemRow instanceof HTMLElement) {
+    itemRow.classList.add('is-menu-open');
+  }
 }
 
 function applyApprovalViewState(view) {

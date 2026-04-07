@@ -67,7 +67,7 @@ const RECENT_WINDOW_MS = 5 * 60 * 1000;
 const FIRST_ADMIN_OPEN_ID = process.env.FIRST_ADMIN_OPEN_ID || 'ou_d652030afb4a5cbe7d08f3cfdda685ad';
 const FIRST_ADMIN_TENANT_KEY = process.env.FIRST_ADMIN_TENANT_KEY || '12f9cd33134f1759';
 const BLOB_STORAGE_HOST_SUFFIX = '.public.blob.vercel-storage.com';
-const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com')
+const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com,larkoffice.com,larkofficecdn.com,feishucdn.com,larkcdn.com')
   .split(',')
   .map((value) => value.trim().toLowerCase())
   .filter((value) => value.length > 0);
@@ -353,7 +353,7 @@ function toTrustedLarkAvatarUrlOrNull(value: unknown): string | null {
     return null;
   }
 
-  return isAllowedLarkAvatarHost(normalized) ? normalized : null;
+  return normalized;
 }
 
 function resolveEffectiveAvatarUrl(customAvatarUrl: unknown, larkAvatarUrl: unknown): string | null {

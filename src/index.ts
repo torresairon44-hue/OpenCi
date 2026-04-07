@@ -33,7 +33,7 @@ const requestedPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 const PORT = requestedPort === 3100 ? 3000 : requestedPort;
 const IS_PRODUCTION = (process.env.NODE_ENV || 'development') === 'production';
 const IS_TEST_ENV = (process.env.NODE_ENV || '').toLowerCase() === 'test';
-const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com')
+const LARK_AVATAR_ALLOWED_HOST_SUFFIXES = String(process.env.LARK_AVATAR_ALLOWED_HOST_SUFFIXES || 'larksuite.com,feishu.cn,byteimg.com,larkoffice.com,larkofficecdn.com,feishucdn.com,larkcdn.com')
   .split(',')
   .map((value) => value.trim().toLowerCase())
   .filter((value) => value.length > 0);
@@ -125,7 +125,7 @@ app.use(helmet({
       scriptSrc: ["'self'", "'unsafe-inline'", "https://www.google.com", "https://www.gstatic.com", "https://cdnjs.cloudflare.com"],
       styleSrc: ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com", "https://cdnjs.cloudflare.com"],
       fontSrc: ["'self'", "https://fonts.gstatic.com", "https://cdnjs.cloudflare.com", "data:"],
-      imgSrc: ["'self'", "data:", "blob:", "https://cdnjs.cloudflare.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://*.public.blob.vercel-storage.com", ...CSP_TRUSTED_LARK_IMG_SOURCES],
+      imgSrc: ["'self'", "data:", "blob:", "https:", "https://cdnjs.cloudflare.com", "https://a.tile.openstreetmap.org", "https://b.tile.openstreetmap.org", "https://c.tile.openstreetmap.org", "https://*.public.blob.vercel-storage.com", ...CSP_TRUSTED_LARK_IMG_SOURCES],
       connectSrc: ["'self'", "https://www.google.com", "https://www.gstatic.com", "https://cdnjs.cloudflare.com"],
       frameSrc: ["'self'", "https://www.google.com", "https://recaptcha.google.com"],
       objectSrc: ["'none'"],

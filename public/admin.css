@@ -1602,12 +1602,18 @@ body.admin-exit {
   grid-template-columns: 1.2fr 1fr 2fr auto;
   gap: 24px;
   align-items: center;
+  position: relative;
+  z-index: 1;
   padding: 18px 20px;
   background: rgba(3, 12, 8, 0.18);
   border-bottom: 1px solid rgba(145, 178, 255, 0.12);
   transition: background 180ms ease;
   animation: itemSlideIn 420ms ease-out both;
   animation-delay: calc(var(--index, 0) * 0.04s);
+}
+
+.approval-item.is-menu-open {
+  z-index: 42;
 }
 
 .approval-item:hover {
