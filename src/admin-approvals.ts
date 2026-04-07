@@ -843,6 +843,7 @@ adminApprovalsRouter.get('/admin/access-activity', requireAuth, requireAdmin, as
       const statusChangedAt = pickStatusChangedAt(latest, status);
       const lastEventAt = latest ? (pickStatusChangedAt(latest, 'recent') || null) : null;
       const parsedLocation = latest ? parseSessionLocation(latest.location, latest.updated_at) : null;
+      const locationText = parsedLocation ? `${parsedLocation.lat.toFixed(4)}, ${parsedLocation.lng.toFixed(4)}` : null;
 
       return {
         userId: user.id,
@@ -859,7 +860,7 @@ adminApprovalsRouter.get('/admin/access-activity', requireAuth, requireAdmin, as
         updatedAt: latest?.updated_at || null,
         device: parseDeviceLabel(latest?.device) || null,
         battery: latest?.battery || null,
-        location: parsedLocation ? `${parsedLocation.lat.toFixed(4)}, ${parsedLocation.lng.toFixed(4)}` : null,
+        location: canManageUsers ? locationText : null,
         isSelf: user.id === requesterUserId,
         isMainAdminIdentity: isMainAdminIdentityByLarkId(user.lark_id),
       };
