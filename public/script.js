@@ -34,6 +34,7 @@ const USER_AVATAR_SOURCE_KEY = 'userAvatarSource';
 let aiServiceHardBlocked = false;
 let aiServiceBlockReason = '';
 let sessionHeartbeatTimer = null;
+let sessionHeartbeatBootstrapTimer = null;
 let locationWatchId = null; // For continuous GPS tracking
 let lastSyncedLocationPayload = null; // Track last synced location to avoid redundant updates
 let shouldResetLocationOnNextSync = false;
@@ -44,6 +45,7 @@ let queuedManualRefresh = false;
 let queuedManualRefreshTimer = null;
 let manualPrecisionDeadlineMs = 0;
 let manualPrecisionTimeoutTimer = null;
+let lastSessionSyncAtMs = 0;
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -70,6 +72,11 @@ const sidebarCloseBtn = document.getElementById('sidebarCloseBtn');
 const sidebarCollapseBtn = document.getElementById('sidebarCollapseBtn');
 const sidebarExpandBtn = document.getElementById('sidebarExpandBtn');
 const settingsModal = document.getElementById('settingsModal');
+const larkLoginModal = document.getElementById('larkLoginModal');
+const larkLoginBackdrop = document.getElementById('larkLoginBackdrop');
+const larkLoginContinueBtn = document.getElementById('larkLoginContinueBtn');
+const authRejectOverlay = document.getElementById('authRejectOverlay');
+const authRejectBackBtn = document.getElementById('authRejectBackBtn');
 const profileName = document.getElementById('profileName');
 const profileRole = document.getElementById('profileRole');
 const profileLocation = document.getElementById('profileLocation');
@@ -94,6 +101,17 @@ const exportDataBtn = document.getElementById('exportDataBtn');
 const requestAdminAccessBtn = document.getElementById('requestAdminAccessBtn');
 const modalOverlay = document.getElementById('modalOverlay');
 const settingsBtn = document.getElementById('settingsBtn');
+const accountMenu = document.getElementById('accountMenu');
+const accountMenuTrigger = document.getElementById('accountMenuTrigger');
+const accountMenuDrawer = document.getElementById('accountMenuDrawer');
+const accountMenuChevron = document.getElementById('accountMenuChevron');
+const accountMenuName = document.getElementById('accountMenuName');
+const accountMenuSubtitle = document.getElementById('accountMenuSubtitle');
+const accountMenuAvatarImg = document.getElementById('accountMenuAvatarImg');
+const accountDashboardLink = document.getElementById('accountDashboardLink');
+const accountRequestAdminBtn = document.getElementById('accountRequestAdminBtn');
+const accountSettingsBtn = document.getElementById('accountSettingsBtn');
+const accountLogoutBtn = document.getElementById('accountLogoutBtn');
 const sidebarProfileAvatarImg = document.getElementById('sidebarProfileAvatarImg');
 const sidebarProfileAvatarFallback = document.getElementById('sidebarProfileAvatarFallback');
 const sidebarProfileAvatarSource = document.getElementById('sidebarProfileAvatarSource');
@@ -120,6 +138,27 @@ function setComposerEnabled(enabled) {
   if (attachImageBtn) {
     attachImageBtn.disabled = !enabled;
   }
+}
+
+function openLarkLoginModal() {
+  if (!larkLoginModal) return;
+  larkLoginModal.removeAttribute('hidden');
+}
+
+function closeLarkLoginModal() {
+  if (!larkLoginModal) return;
+  larkLoginModal.setAttribute('hidden', '');
+}
+
+function showAuthRejectOverlay() {
+  if (!authRejectOverlay) return;
+  closeLarkLoginModal();
+  authRejectOverlay.removeAttribute('hidden');
+}
+
+function hideAuthRejectOverlay() {
+  if (!authRejectOverlay) return;
+  authRejectOverlay.setAttribute('hidden', '');
 }
 
 async function buildHttpError(response) {
@@ -292,7 +331,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Check if the user is already logged in (JWT cookie via /api/auth/me)
   await checkAuthSession();
-  startSessionHeartbeat();
 
   // Load CAPTCHA provider configuration.
   await loadCaptchaConfig();
@@ -313,12 +351,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Check for auth errors in the URL (redirected from Lark callback)
   const urlParams = new URLSearchParams(window.location.search);
   const authError = urlParams.get('error');
-  if (authError === 'unauthorized_role') {
-    alert('Login failed: Your Lark account does not have an authorized role (Admin or Fieldman).');
+  if (authError === 'unauthorized_role' || authError === 'auth_failed') {
+    showAuthRejectOverlay();
     window.history.replaceState({}, '', '/');
-  } else if (authError === 'auth_failed') {
-    alert('Login failed: Could not authenticate with Lark. Please try again.');
-    window.history.replaceState({}, '', '/');
+  }
+
+  if (authRejectBackBtn) {
+    authRejectBackBtn.addEventListener('click', () => {
+      hideAuthRejectOverlay();
+      startNewChat();
+    });
   }
 
   // Always start a fresh new chat on page load
@@ -508,7 +550,34 @@ async function requestAdminAccess() {
 
 function updateAuthButtons(loggedIn) {
   if (loginBtn) loginBtn.style.display = loggedIn ? 'none' : 'inline-flex';
-  if (logoutBtn) logoutBtn.style.display = loggedIn ? 'inline-flex' : 'none';
+  if (logoutBtn) logoutBtn.style.display = 'none';
+  if (accountLogoutBtn) {
+    accountLogoutBtn.hidden = !loggedIn;
+  }
+}
+
+function setAccountMenuOpen(isOpen) {
+  if (!accountMenuDrawer || !accountMenuTrigger) return;
+  const open = Boolean(isOpen);
+  if (open) {
+    accountMenuDrawer.removeAttribute('hidden');
+  } else {
+    accountMenuDrawer.setAttribute('hidden', '');
+  }
+  accountMenuTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (accountMenuChevron) {
+    accountMenuChevron.classList.toggle('is-open', open);
+  }
+}
+
+function toggleAccountMenuFromEvent(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  if (!accountMenuDrawer) return;
+  const isCurrentlyOpen = !accountMenuDrawer.hasAttribute('hidden');
+  setAccountMenuOpen(!isCurrentlyOpen);
 }
 // ───────────────────────────────────────────────────────────────────
 // EVENT LISTENERS
@@ -637,8 +706,8 @@ function setupEventListeners() {
     triggerManualRefresh();
   });
 
-  if (adminDashboardProfileLink) {
-    adminDashboardProfileLink.addEventListener('click', (event) => {
+  if (accountDashboardLink) {
+    accountDashboardLink.addEventListener('click', (event) => {
       const normalizedRole = (currentUserRole || '').trim().toLowerCase();
       if (!isLoggedIn || normalizedRole !== 'admin') {
         event.preventDefault();
@@ -649,40 +718,64 @@ function setupEventListeners() {
   // Auth buttons
   if (loginBtn) {
     loginBtn.addEventListener('click', () => {
-      // Redirect to Lark OAuth — the server handles the rest
+      openLarkLoginModal();
+    });
+  }
+
+  if (larkLoginContinueBtn) {
+    larkLoginContinueBtn.addEventListener('click', () => {
       window.location.href = '/api/auth/lark';
     });
   }
 
-  if (logoutBtn) {
-    logoutBtn.addEventListener('click', async () => {
-      stopLocationWatch();
-      try {
-        await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-      } catch (e) {
-        console.warn('Logout request failed:', e);
-      }
-      isLoggedIn = false;
-      currentUserId = null;
-      currentUserName = 'User';
-      currentUserRole = 'Identifying...';
-      currentUserLarkAvatarUrl = null;
-      currentUserCustomAvatarUrl = null;
-      currentUserAvatarSource = 'default';
-      pendingProfilePhotoFile = null;
-      revokePendingProfilePhotoPreview();
-      localStorage.removeItem('userName');
-      localStorage.removeItem('userRole');
-      clearStoredAvatarState();
-      updateAuthButtons(false);
-      updateProfileUI();
-      stopSessionHeartbeat();
-      lastSyncedLocationPayload = null;
-      shouldResetLocationOnNextSync = false;
-      locationHistory.length = 0;
-      localStorage.removeItem(LOCATION_CACHE_KEY);
-      await startNewChat();
+  if (larkLoginBackdrop) {
+    larkLoginBackdrop.addEventListener('click', () => {
+      closeLarkLoginModal();
     });
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && larkLoginModal && !larkLoginModal.hasAttribute('hidden')) {
+      closeLarkLoginModal();
+    }
+  });
+
+  const handleLogout = async () => {
+    setAccountMenuOpen(false);
+    stopLocationWatch();
+    try {
+      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch (e) {
+      console.warn('Logout request failed:', e);
+    }
+    isLoggedIn = false;
+    currentUserId = null;
+    currentUserName = 'User';
+    currentUserRole = 'Identifying...';
+    currentUserLarkAvatarUrl = null;
+    currentUserCustomAvatarUrl = null;
+    currentUserAvatarSource = 'default';
+    pendingProfilePhotoFile = null;
+    revokePendingProfilePhotoPreview();
+    localStorage.removeItem('userName');
+    localStorage.removeItem('userRole');
+    clearStoredAvatarState();
+    updateAuthButtons(false);
+    updateProfileUI();
+    stopSessionHeartbeat();
+    lastSyncedLocationPayload = null;
+    shouldResetLocationOnNextSync = false;
+    locationHistory.length = 0;
+    localStorage.removeItem(LOCATION_CACHE_KEY);
+    await startNewChat();
+  };
+
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', handleLogout);
+  }
+
+  if (accountLogoutBtn) {
+    accountLogoutBtn.addEventListener('click', handleLogout);
   }
 
   window.addEventListener('pagehide', () => {
@@ -705,7 +798,16 @@ function setupEventListeners() {
 
   // Settings — open/close
   if (settingsBtn) {
-    settingsBtn.addEventListener('click', openSettings);
+    settingsBtn.addEventListener('click', () => {
+      setAccountMenuOpen(false);
+      openSettings();
+    });
+  }
+  if (accountSettingsBtn) {
+    accountSettingsBtn.addEventListener('click', () => {
+      setAccountMenuOpen(false);
+      openSettings();
+    });
   }
   settingsModal.addEventListener('click', (e) => {
     if (e.target === settingsModal) closeSettings();
@@ -753,6 +855,25 @@ function setupEventListeners() {
   if (requestAdminAccessBtn) {
     requestAdminAccessBtn.addEventListener('click', requestAdminAccess);
   }
+  if (accountRequestAdminBtn) {
+    accountRequestAdminBtn.addEventListener('click', async () => {
+      setAccountMenuOpen(false);
+      await requestAdminAccess();
+    });
+  }
+
+  if (accountMenuTrigger) {
+    accountMenuTrigger.addEventListener('click', toggleAccountMenuFromEvent);
+  }
+
+  document.addEventListener('click', (event) => {
+    if (!accountMenu || !accountMenuDrawer || accountMenuDrawer.hidden) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (!target.closest('#accountMenu')) {
+      setAccountMenuOpen(false);
+    }
+  });
 
   // Theme select
   if (themeSelect) {
@@ -784,12 +905,14 @@ function setupEventListeners() {
       // Enable smooth transition, apply theme, then remove transition class
       document.body.classList.add('theme-transitioning');
       localStorage.setItem('theme', next);
-      applyTheme(next);
-      updateThemeSelect(next);
+      requestAnimationFrame(() => {
+        applyTheme(next);
+        updateThemeSelect(next);
+      });
 
       setTimeout(() => {
         document.body.classList.remove('theme-transitioning');
-      }, 600);
+      }, 240);
     });
   }
 
@@ -835,36 +958,6 @@ function setupEventListeners() {
     });
   }
 
-  // ── Idle avatar shake ──────────────────────────────────────────
-  let idleShakeTimer = null;
-  let idleShakeRepeatTimer = null;
-
-  function triggerAvatarShake() {
-    const avatars = document.querySelectorAll('.message-assistant .message-avatar');
-    if (avatars.length) {
-      const last = avatars[avatars.length - 1];
-      last.animate([
-        { translate: '0px' },
-        { translate: '-5px' },
-        { translate: '5px' },
-        { translate: '-4px' },
-        { translate: '4px' },
-        { translate: '-2px' },
-        { translate: '2px' },
-        { translate: '0px' }
-      ], { duration: 700, easing: 'ease-in-out', composite: 'add' });
-    }
-    idleShakeRepeatTimer = setTimeout(triggerAvatarShake, 8000);
-  }
-
-  function resetIdleShakeTimer() {
-    clearTimeout(idleShakeTimer);
-    clearTimeout(idleShakeRepeatTimer);
-    idleShakeTimer = setTimeout(triggerAvatarShake, 5000);
-  }
-
-  messageInput.addEventListener('input', resetIdleShakeTimer);
-  resetIdleShakeTimer();
 }
 
 function toggleAttachMenu() {
@@ -1708,13 +1801,14 @@ async function loadConversations() {
         item.classList.add('active');
       }
 
-      const displayTitle = conv.title && conv.title.trim() ? escapeHtml(conv.title) : 'OpenCI Help Desk';
+      const safeCurrentTitle = conv.title && conv.title.trim() ? conv.title.trim() : DEFAULT_CHAT_TITLE;
+      const displayTitle = escapeHtml(safeCurrentTitle);
 
       item.innerHTML = `
         <div class="conversation-title">${displayTitle}</div>
         <div class="conversation-actions">
-          <button class="conversation-edit-btn" title="Rename" style="display: none;">
-            <i class="fas fa-edit"></i>
+          <button class="conversation-edit-btn" title="Rename">
+            <i class="fas fa-pen"></i>
           </button>
           <button class="conversation-delete-btn" title="Delete">
             <i class="fas fa-trash"></i>
@@ -1723,21 +1817,11 @@ async function loadConversations() {
       `;
 
       item.addEventListener('click', (e) => {
+        if (item.classList.contains('is-editing')) return;
         // Only load conversation if delete or edit button was not clicked
         if (!e.target.closest('.conversation-delete-btn') && !e.target.closest('.conversation-edit-btn')) {
           loadConversation(conv.id);
         }
-      });
-
-      // Show edit button on hover
-      item.addEventListener('mouseenter', () => {
-        const editBtn = item.querySelector('.conversation-edit-btn');
-        if (editBtn) editBtn.style.display = 'flex';
-      });
-
-      item.addEventListener('mouseleave', () => {
-        const editBtn = item.querySelector('.conversation-edit-btn');
-        if (editBtn) editBtn.style.display = 'none';
       });
 
       // Add proper event listener for edit button
@@ -1745,7 +1829,7 @@ async function loadConversations() {
       if (editBtn) {
         editBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          editConversationTitle(conv.id, displayTitle);
+          startInlineConversationTitleEdit(item, conv.id, safeCurrentTitle);
         });
       }
 
@@ -1754,7 +1838,7 @@ async function loadConversations() {
       if (deleteBtn) {
         deleteBtn.addEventListener('click', (e) => {
           e.stopPropagation();
-          deleteConversation(conv.id);
+          deleteConversation(conv.id, item);
         });
       }
 
@@ -1857,30 +1941,87 @@ async function updateConversationTitle(conversationId, title) {
   }
 }
 
-async function editConversationTitle(conversationId, currentTitle) {
-  const newTitle = prompt('Enter new chat name:', currentTitle === DEFAULT_CHAT_TITLE ? '' : currentTitle);
+function startInlineConversationTitleEdit(item, conversationId, currentTitle) {
+  const titleNode = item.querySelector('.conversation-title');
+  if (!titleNode || item.classList.contains('is-editing')) return;
 
-  if (newTitle === null || newTitle === undefined) {
-    return; // User cancelled
-  }
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'conversation-title-input';
+  input.maxLength = 100;
+  input.value = currentTitle === DEFAULT_CHAT_TITLE ? '' : currentTitle;
 
-  if (newTitle.trim() === currentTitle || (newTitle.trim() === '' && currentTitle === DEFAULT_CHAT_TITLE)) {
-    return; // No change
-  }
+  titleNode.textContent = '';
+  titleNode.appendChild(input);
+  item.classList.add('is-editing');
+  input.focus();
+  input.select();
 
-  try {
-    await updateConversationTitle(conversationId, newTitle.trim());
-    await loadConversations();
-    if (currentConversationId === conversationId) {
-      setVisibleChatTitle(newTitle.trim());
+  let finalized = false;
+
+  const finalize = async (saveChange) => {
+    if (finalized) return;
+    finalized = true;
+
+    const nextRawTitle = input.value.trim();
+    const nextDisplayTitle = nextRawTitle || DEFAULT_CHAT_TITLE;
+
+    titleNode.textContent = saveChange ? nextDisplayTitle : currentTitle;
+    item.classList.remove('is-editing');
+
+    if (!saveChange) return;
+    if (nextDisplayTitle === currentTitle) return;
+
+    try {
+      await updateConversationTitle(conversationId, nextRawTitle);
+      if (currentConversationId === conversationId) {
+        setVisibleChatTitle(nextDisplayTitle);
+      }
+      await loadConversations();
+    } catch (error) {
+      console.error('Error editing conversation title:', error);
+      alert('Failed to rename chat');
+      await loadConversations();
     }
-  } catch (error) {
-    console.error('Error editing conversation title:', error);
-    alert('Failed to rename chat');
-  }
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finalize(true);
+      return;
+    }
+
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      finalize(false);
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    finalize(true);
+  });
 }
 
-async function deleteConversation(conversationId) {
+async function deleteConversation(conversationId, conversationItem = null) {
+  let removedSnapshot = null;
+
+  if (conversationItem instanceof Element && conversationsList?.contains(conversationItem)) {
+    const parent = conversationItem.parentElement;
+    if (parent) {
+      removedSnapshot = {
+        parent,
+        node: conversationItem,
+        nextSibling: conversationItem.nextSibling,
+      };
+      parent.removeChild(conversationItem);
+
+      if (!parent.querySelector('.conversation-item')) {
+        parent.innerHTML = '<p class="no-chats-message">No sessions found.</p>';
+      }
+    }
+  }
+
   try {
     const response = await fetch(`/api/conversations/${conversationId}`, {
       method: 'DELETE',
@@ -1892,12 +2033,23 @@ async function deleteConversation(conversationId) {
 
     if (currentConversationId === conversationId) {
       await startNewChat();
-    } else {
+    } else if (!removedSnapshot) {
       await loadConversations();
     }
 
   } catch (error) {
     console.error('Error deleting conversation:', error);
+
+    if (removedSnapshot) {
+      const { parent, node, nextSibling } = removedSnapshot;
+      const placeholder = parent.querySelector('.no-chats-message');
+      if (placeholder) {
+        placeholder.remove();
+      }
+      parent.insertBefore(node, nextSibling);
+    }
+
+    await loadConversations();
   }
 }
 
@@ -1976,16 +2128,42 @@ function updateProfileUI() {
     profileRole.textContent = currentUserRole;
   }
   if (requestAdminAccessBtn) {
-    requestAdminAccessBtn.style.display = normalizedRole === 'admin' ? 'none' : 'inline-flex';
-  }
-  if (adminDashboardProfileItem) {
-    adminDashboardProfileItem.hidden = !canAccessAdminDashboard;
-  }
-  if (adminDashboardProfileLink) {
-    adminDashboardProfileLink.setAttribute('aria-hidden', canAccessAdminDashboard ? 'false' : 'true');
+    requestAdminAccessBtn.style.display = 'none';
   }
   profileLocation.textContent = currentUserLocation;
   chatSubtitle.textContent = `Ready to help, ${currentUserName}!`;
+
+  if (accountMenuName) {
+    accountMenuName.textContent = currentUserName;
+  }
+
+  if (accountMenuSubtitle) {
+    if (normalizedRole === 'admin') {
+      accountMenuSubtitle.textContent = 'Admin Dashboard';
+    } else if (normalizedRole === 'fieldman') {
+      accountMenuSubtitle.textContent = 'Admin Request';
+    } else {
+      accountMenuSubtitle.textContent = '';
+    }
+  }
+
+  if (accountDashboardLink) {
+    accountDashboardLink.hidden = !canAccessAdminDashboard;
+  }
+
+  if (accountRequestAdminBtn) {
+    accountRequestAdminBtn.hidden = !isLoggedIn || normalizedRole !== 'fieldman';
+  }
+
+  if (accountMenuAvatarImg) {
+    const effectiveAvatar = getEffectiveUserAvatarUrl();
+    accountMenuAvatarImg.src = effectiveAvatar || '/assets/branding/ci.png';
+  }
+
+  if (!isLoggedIn) {
+    setAccountMenuOpen(false);
+  }
+
   // Sync Settings panel inputs
   if (userName) userName.value = currentUserName;
   const savedEmail = localStorage.getItem('userEmail');
@@ -2080,6 +2258,12 @@ async function syncSessionLocation(locationPayload = null, options = {}) {
   }
 
   const shouldHeartbeat = options.heartbeat !== false;
+  const fromHeartbeat = options.fromHeartbeat === true;
+
+  // Skip redundant heartbeat requests when a recent successful sync already happened.
+  if (fromHeartbeat && (Date.now() - lastSessionSyncAtMs) < 45000) {
+    return;
+  }
 
   try {
     const response = await fetch('/api/auth/session/update', {
@@ -2096,6 +2280,7 @@ async function syncSessionLocation(locationPayload = null, options = {}) {
 
     if (response.ok) {
       shouldResetLocationOnNextSync = false;
+      lastSessionSyncAtMs = Date.now();
     }
 
     if (!response.ok && response.status !== 401 && response.status !== 403) {
@@ -2109,6 +2294,11 @@ async function syncSessionLocation(locationPayload = null, options = {}) {
 }
 
 function stopSessionHeartbeat() {
+  if (sessionHeartbeatBootstrapTimer) {
+    window.clearTimeout(sessionHeartbeatBootstrapTimer);
+    sessionHeartbeatBootstrapTimer = null;
+  }
+
   if (sessionHeartbeatTimer) {
     window.clearInterval(sessionHeartbeatTimer);
     sessionHeartbeatTimer = null;
@@ -2123,20 +2313,24 @@ function startSessionHeartbeat() {
   // Also syncs last known location if available
   const heartbeatWithLocation = () => {
     if (lastSyncedLocationPayload) {
-      syncSessionLocation(lastSyncedLocationPayload);
+      syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true, fromHeartbeat: true });
     } else {
-      syncSessionLocation(null, { heartbeat: true });
+      syncSessionLocation(null, { heartbeat: true, fromHeartbeat: true });
     }
   };
-  
-  heartbeatWithLocation();
-  window.setTimeout(() => {
+
+  // Give startup location/auth sync a short head-start to avoid duplicate update calls.
+  sessionHeartbeatBootstrapTimer = window.setTimeout(() => {
+    sessionHeartbeatBootstrapTimer = null;
     if (!isLoggedIn) return;
-    heartbeatWithLocation();
-  }, 1200);
-  sessionHeartbeatTimer = window.setInterval(() => {
-    heartbeatWithLocation();
-  }, 30000);
+    if ((Date.now() - lastSessionSyncAtMs) > 15000) {
+      heartbeatWithLocation();
+    }
+
+    sessionHeartbeatTimer = window.setInterval(() => {
+      heartbeatWithLocation();
+    }, 60000);
+  }, 4000);
 }
 
 function stopSessionOnExit() {
@@ -2601,9 +2795,9 @@ async function getUserLocation(options = {}) {
 
       // During manual refresh spam, keep the last stable fix instead of replaying stale cached fallback.
       if (manualRefresh && lastSyncedLocationPayload) {
-        currentUserLocation = `${Number(lastSyncedLocationPayload.lat).toFixed(4)}, ${Number(lastSyncedLocationPayload.lng).toFixed(4)} (last stable fix)`;
+        currentUserLocation = 'Waiting for live GPS fix...';
         updateProfileUI();
-        await syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true });
+        await syncSessionLocation(null, { heartbeat: true });
         finishRequest();
         return;
       }
@@ -2622,7 +2816,7 @@ async function getUserLocation(options = {}) {
     {
       enableHighAccuracy: true,
       timeout: 15000,
-      maximumAge: 0,
+      maximumAge: 15000,
     }
   );
 }

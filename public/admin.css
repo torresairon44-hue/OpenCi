@@ -48,7 +48,7 @@ body.admin-exit {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  opacity: 0.58;
+  opacity: 0;
   background-image:
     radial-gradient(circle at 8% 18%, rgba(241, 248, 255, 0.95) 0 1px, transparent 1.9px),
     radial-gradient(circle at 14% 78%, rgba(234, 245, 255, 0.85) 0 1px, transparent 1.9px),
@@ -68,7 +68,7 @@ body.admin-exit {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  opacity: 0.34;
+  opacity: 0;
   background-image:
     radial-gradient(circle at 6% 26%, rgba(245, 251, 255, 0.92) 0 1px, transparent 2px),
     radial-gradient(circle at 12% 62%, rgba(236, 247, 255, 0.9) 0 1px, transparent 2px),
@@ -82,6 +82,30 @@ body.admin-exit {
     radial-gradient(circle at 77% 45%, rgba(236, 247, 255, 0.9) 0 1px, transparent 2px),
     radial-gradient(circle at 86% 24%, rgba(245, 251, 255, 0.92) 0 1px, transparent 2px),
     radial-gradient(circle at 93% 64%, rgba(236, 247, 255, 0.9) 0 1px, transparent 2px);
+  animation: starSnow 5.4s ease-in-out infinite;
+}
+
+.admin-shell.dashboard-stars::before {
+  opacity: 0.58;
+}
+
+.admin-shell.dashboard-stars::after {
+  opacity: 0.34;
+}
+
+.admin-shell:not(:has(.admin-canvas[data-mode="learn"]))::before,
+.admin-shell:not(:has(.admin-canvas[data-mode="learn"]))::after {
+  opacity: 0 !important;
+  animation: none;
+}
+
+.admin-shell:has(.admin-canvas[data-mode="learn"])::before {
+  opacity: 0.58 !important;
+  animation: spaceDrift 14s linear infinite;
+}
+
+.admin-shell:has(.admin-canvas[data-mode="learn"])::after {
+  opacity: 0.34 !important;
   animation: starSnow 5.4s ease-in-out infinite;
 }
 
@@ -453,7 +477,7 @@ body.admin-exit {
     radial-gradient(circle, rgba(244, 251, 255, 0.72) 0 0.35px, transparent 1.05px);
   background-size: 74px 74px, 108px 108px, 132px 132px;
   background-position: 0 0, 26px 18px, 48px 36px;
-  animation: starSnow 4.8s ease-in-out infinite;
+  animation: starSnow 4.8s ease-in-out infinite, radialRotate 22s linear infinite;
 }
 
 .radial-stars {
@@ -480,7 +504,8 @@ body.admin-exit {
     radial-gradient(circle at 8% 86%, rgba(237, 247, 255, 0.76) 0 1px, transparent 1.8px),
     radial-gradient(circle at 48% 90%, rgba(243, 250, 255, 0.78) 0 1px, transparent 1.8px),
     radial-gradient(circle at 88% 84%, rgba(238, 248, 255, 0.78) 0 1px, transparent 1.8px);
-  animation: starTwinkle 3.4s ease-in-out infinite, radialRotate 80s linear infinite, starsZoomEntry 1.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation: starTwinkle 3.4s ease-in-out infinite, radialRotate 34s linear infinite, starsZoomEntry 1.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-direction: normal, normal, normal;
 }
 
 .radial-stars::after {
@@ -500,7 +525,8 @@ body.admin-exit {
     radial-gradient(circle at 83% 54%, rgba(234, 247, 255, 0.84) 0 1px, transparent 1.7px);
   background-size: 68px 68px, 102px 102px, auto, auto, auto, auto, auto, auto;
   background-position: 0 0, 20px 14px, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
-  animation: starTwinkleAlt 5.8s ease-in-out infinite;
+  animation: starTwinkleAlt 5.8s ease-in-out infinite, radialRotate 40s linear infinite;
+  animation-direction: normal, reverse;
 }
 
 .radial-stars::before {
@@ -556,7 +582,8 @@ body.admin-exit {
     140px 18px 0 0 rgba(236, 247, 255, 0.72),
     122px 60px 0 0 rgba(246, 252, 255, 0.88),
     136px 96px 0 0 rgba(237, 248, 255, 0.74);
-  animation: starSnow 4.4s ease-in-out infinite;
+  animation: starSnow 4.4s ease-in-out infinite, radialRotate 28s linear infinite;
+  animation-direction: normal, normal;
 }
 
 .radial-pulse,
@@ -635,7 +662,7 @@ body.admin-exit {
   position: absolute;
   inset: 0;
   z-index: 2;
-  animation: radialRotate 60s linear infinite;
+  animation: radialRotate 18s linear infinite;
 }
 
 .dashboard-spoke {
@@ -1030,24 +1057,25 @@ body.admin-exit {
 }
 
 .fieldman-overlay-toggle {
+  display: none !important;
   pointer-events: auto;
   position: absolute;
   top: 50%;
   transform: translateY(-50%);
-  width: 22px;
-  height: 22px;
-  border: 1px solid rgba(232, 240, 255, 0.35);
-  border-radius: 4px;
-  background: rgba(4, 10, 8, 0.72);
-  color: #f5fbff;
-  font-size: 0.92rem;
+  width: auto;
+  height: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  color: #000000;
+  font-size: 1.82rem;
   font-weight: 700;
   line-height: 1;
-  display: inline-flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+  text-shadow: 0 0 4px rgba(255, 255, 255, 0.7);
   z-index: 760;
 }
 
@@ -2345,6 +2373,7 @@ body.admin-exit {
   }
 }
 
+
 @media (max-width: 1080px) {
   .admin-card {
     grid-template-columns: clamp(200px, 30vw, 250px) 1fr;
@@ -2383,6 +2412,10 @@ body.admin-exit {
 }
 
 @media (max-width: 760px) {
+  .fieldman-side-arrow {
+    display: none !important;
+  }
+
   body.admin-nav-lock {
     overflow: hidden;
   }
@@ -2491,8 +2524,13 @@ body.admin-exit {
     width: 18px;
     height: 2px;
     border-radius: 999px;
-    background: #f0fff4;
-    box-shadow: 0 -6px 0 #f0fff4, 0 6px 0 #f0fff4;
+    background: #7cf5a8;
+    box-shadow: 0 -6px 0 #7cf5a8, 0 6px 0 #7cf5a8;
+  }
+
+  .admin-card.prepare-fullmap .nav-toggle::before {
+    background: #000000;
+    box-shadow: 0 -6px 0 #000000, 0 6px 0 #000000;
   }
 
   .nav-toggle:hover,
@@ -2551,7 +2589,7 @@ body.admin-exit {
 
   .nav-link.is-active {
     border-bottom-color: rgba(139, 244, 179, 0.72);
-    color: #ffffff;
+    color: #7cf5a8;
     background: transparent;
   }
 
@@ -2812,9 +2850,11 @@ body.admin-exit {
     top: auto;
     right: 12px;
     bottom: 12px;
-    left: 12px;
+    left: auto;
+    width: auto;
+    max-width: min(172px, calc(100% - 24px));
     align-items: flex-start;
-    padding: 10px 12px;
+    padding: 8px 10px;
   }
 
   .admin-canvas[data-mode="prepare"] .fieldman-map-overlay-left {
@@ -2826,7 +2866,7 @@ body.admin-exit {
   }
 
   .admin-canvas[data-mode="prepare"] .fieldman-map-overlay-right {
-    left: 12px;
+    left: auto;
     right: 12px;
     bottom: auto;
     top: 68px;
@@ -2837,7 +2877,7 @@ body.admin-exit {
   }
 
   .admin-canvas[data-mode="prepare"] .fieldman-map-overlay-right.is-collapsed {
-    transform: translateX(calc(100% + 20px));
+    transform: translateX(calc(100% - 8px));
   }
 
   .admin-card.prepare-fullmap .fieldman-map-overlay-left {
@@ -2851,11 +2891,12 @@ body.admin-exit {
     align-items: flex-start;
     justify-content: flex-start;
     flex-wrap: nowrap;
-    gap: 6px;
+    gap: 4px;
   }
 
   .legend-chip {
-    min-width: 84px;
+    min-width: 0;
+    font-size: 0.8rem;
   }
 
   .fieldman-row {

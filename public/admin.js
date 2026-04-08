@@ -1,5 +1,6 @@
 const adminCanvas = document.querySelector('.admin-canvas');
 const adminCard = document.querySelector('.admin-card');
+const adminShell = document.querySelector('.admin-shell');
 const modeLabel = document.getElementById('modeLabel');
 const modeNote = document.getElementById('modeNote');
 const navIndicator = document.getElementById('navIndicator');
@@ -194,6 +195,9 @@ async function loadAdminIdentity() {
 
 function commitMode(mode) {
   const selected = modes[mode] || modes.learn;
+  if (adminShell) {
+    adminShell.classList.toggle('dashboard-stars', mode === 'learn');
+  }
   if (modeLabel) modeLabel.textContent = selected.label;
   if (modeNote) modeNote.textContent = selected.note;
   if (adminCanvas) adminCanvas.setAttribute('data-mode', mode);
@@ -609,8 +613,9 @@ function requestGeolocationAccess() {
 }
 
 async function activateFieldmanLocationMode() {
-  setOverlayPanelCollapsed(fieldmanLeftOverlayPanel, fieldmanLeftOverlayToggle, 'left', true);
-  setOverlayPanelCollapsed(fieldmanRightOverlayPanel, fieldmanRightOverlayToggle, 'right', true);
+  const shouldCollapseOverlays = false;
+  setOverlayPanelCollapsed(fieldmanLeftOverlayPanel, fieldmanLeftOverlayToggle, 'left', shouldCollapseOverlays);
+  setOverlayPanelCollapsed(fieldmanRightOverlayPanel, fieldmanRightOverlayToggle, 'right', shouldCollapseOverlays);
 
   // Render the base map immediately so the panel never appears as a blank white area.
   renderFieldmanLocations([], { inPhilippinesCount: 0, excludedOutOfPhilippinesCount: 0 });
@@ -743,14 +748,7 @@ function setOverlayPanelCollapsed(panel, toggleButton, direction, collapsed) {
 }
 
 function toggleOverlayPanel(panel, toggleButton, direction) {
-  if (!panel || !toggleButton) return;
-  const collapsed = !panel.classList.contains('is-collapsed');
-  setOverlayPanelCollapsed(panel, toggleButton, direction, collapsed);
-  if (fieldmanMapInstance) {
-    window.setTimeout(() => {
-      fieldmanMapInstance.invalidateSize();
-    }, 230);
-  }
+  if (!panel || !toggleButton || !direction) return;
 }
 
 function getMarkerVisualByZoom(zoomValue) {
