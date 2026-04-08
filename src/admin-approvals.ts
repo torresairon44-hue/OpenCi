@@ -276,6 +276,36 @@ function isMainAdminRequester(user: any): boolean {
   return role === 'admin' && larkId === FIRST_ADMIN_OPEN_ID && tenant === FIRST_ADMIN_TENANT_KEY;
 }
 
+function getPermittedRoleTargetForRequester(
+  requester: any,
+  target: { id: string; role: string | null; lark_id: string | null }
+): 'admin' | 'fieldman' | null {
+  const requesterRole = String(requester?.role || '').toLowerCase();
+  if (requesterRole !== 'admin') {
+    return null;
+  }
+
+  if (isMainAdminIdentityByLarkId(target.lark_id)) {
+    return null;
+  }
+
+  const targetRole = String(target.role || '').toLowerCase() === 'admin' ? 'admin' : 'fieldman';
+  if (isMainAdminRequester(requester)) {
+    return targetRole === 'admin' ? 'fieldman' : 'admin';
+  }
+
+  const requesterId = String(requester?.userId || '');
+  if (targetRole === 'fieldman') {
+    return 'admin';
+  }
+
+  if (targetRole === 'admin' && String(target.id) === requesterId) {
+    return 'fieldman';
+  }
+
+  return null;
+}
+
 function normalizeAvatarUrl(value: unknown): string | null {
   const raw = String(value || '').trim();
   if (!raw) return null;
@@ -892,6 +922,7 @@ adminApprovalsRouter.get('/admin/access-activity', requireAuth, requireAdmin, as
   const requester = (req as any).user;
   const requesterUserId = String(requester?.userId || '');
   const canManageUsers = isMainAdminRequester(requester);
+  const canManageRoleChanges = String(requester?.role || '').toLowerCase() === 'admin';
   const users = await runQuery<DashboardUserRow>(`SELECT id, username, role, lark_id, lark_avatar_url, custom_avatar_url FROM users`);
   const sessions = await runQuery<SessionRow>(
     `SELECT user_id, session_id, location, start_time, updated_at, stop_time, battery, device FROM user_sessions`
@@ -955,6 +986,8 @@ adminApprovalsRouter.get('/admin/access-activity', requireAuth, requireAdmin, as
     success: true,
     generatedAt: new Date().toISOString(),
     canManageUsers,
+    canManageRoleChanges,
+    isMainAdminRequester: canManageUsers,
     currentUserId: requesterUserId,
     summary: {
       totalUsers: items.length,
@@ -966,7 +999,7 @@ adminApprovalsRouter.get('/admin/access-activity', requireAuth, requireAdmin, as
   });
 });
 
-adminApprovalsRouter.patch('/admin/users/:id/role', requireAuth, requireAdmin, requireMainAdmin, async (req: Request, res: Response) => {
+adminApprovalsRouter.patch('/admin/users/:id/role', requireAuth, requireAdmin, async (req: Request, res: Response) => {
   const requester = (req as any).user;
   const targetUserId = String(req.params.id || '').trim();
   const requestedRole = String(req.body?.role || '').toLowerCase();
@@ -997,13 +1030,14 @@ adminApprovalsRouter.patch('/admin/users/:id/role', requireAuth, requireAdmin, r
     return;
   }
 
-  if (isMainAdminIdentityByLarkId(target.lark_id)) {
-    res.status(403).json({ error: 'Main admin account role cannot be changed from this action' });
+  const permittedRoleTarget = getPermittedRoleTargetForRequester(requester, target);
+  if (!permittedRoleTarget) {
+    res.status(403).json({ error: 'You are not allowed to change this user role' });
     return;
   }
 
-  if (String(target.id) === String(requester?.userId || '') && requestedRole === 'fieldman') {
-    res.status(409).json({ error: 'Main admin cannot demote own account' });
+  if (requestedRole !== permittedRoleTarget) {
+    res.status(403).json({ error: `Allowed role change for this user is only: ${permittedRoleTarget}` });
     return;
   }
 

@@ -4,6 +4,10 @@ const modeLabel = document.getElementById('modeLabel');
 const modeNote = document.getElementById('modeNote');
 const navIndicator = document.getElementById('navIndicator');
 const navLinks = Array.from(document.querySelectorAll('.nav-link'));
+const adminNav = document.querySelector('.admin-nav');
+const adminNavToggle = document.getElementById('adminNavToggle');
+const adminNavLinks = document.getElementById('adminNavLinks');
+const adminNavOverlay = document.getElementById('adminNavOverlay');
 const adminApprovePanel = document.getElementById('adminApprovePanel');
 const approvalTitle = document.getElementById('approvalTitle');
 const approvalSubtitle = document.getElementById('approvalSubtitle');
@@ -31,6 +35,12 @@ const fieldmanLocationStatus = document.getElementById('fieldmanLocationStatus')
 const fieldmanLocationList = document.getElementById('fieldmanLocationList');
 const fieldmanLocationMap = document.getElementById('fieldmanLocationMap');
 const fieldmanRefreshBtn = document.getElementById('fieldmanRefreshBtn');
+const fieldmanLeftOverlayToggle = document.getElementById('fieldmanLeftOverlayToggle');
+const fieldmanRightOverlayToggle = document.getElementById('fieldmanRightOverlayToggle');
+const fieldmanLeftOverlayPanel = document.querySelector('.fieldman-map-overlay-left');
+const fieldmanRightOverlayPanel = document.querySelector('.fieldman-map-overlay-right');
+const fieldmanLeftEdgeArrow = document.getElementById('fieldmanLeftEdgeArrow');
+const fieldmanRightEdgeArrow = document.getElementById('fieldmanRightEdgeArrow');
 const fieldmanInLuzonCount = document.getElementById('fieldmanInLuzonCount');
 const fieldmanExcludedCount = document.getElementById('fieldmanExcludedCount');
 const adminUserAvatarShell = document.getElementById('adminUserAvatarShell');
@@ -44,6 +54,9 @@ let currentSortMode = 'newest';
 let loadedApprovalItems = [];
 let loadedApprovalActivityItems = [];
 let canManageLarkUsers = false;
+let canDeleteLarkUsers = false;
+let isMainAdminOperator = false;
+let currentAccessUserId = '';
 let activeMode = null;
 let fieldmanPollTimer = null;
 let fieldmanMapInstance = null;
@@ -84,6 +97,40 @@ const pathToMode = {
   '/admin/activity-log': 'execute',
   '/admin/execute': 'execute',
 };
+
+function isMobileViewport() {
+  return window.matchMedia('(max-width: 760px)').matches;
+}
+
+function setMobileNavOpenState(isOpen) {
+  if (!adminNav) return;
+  adminNav.classList.toggle('is-open', Boolean(isOpen));
+  if (adminNavToggle) {
+    adminNavToggle.setAttribute('aria-expanded', isOpen ? 'true' : 'false');
+    adminNavToggle.setAttribute('aria-label', isOpen ? 'Close navigation menu' : 'Open navigation menu');
+  }
+  if (adminNavLinks && isMobileViewport()) {
+    adminNavLinks.hidden = !isOpen;
+  } else if (adminNavLinks) {
+    adminNavLinks.hidden = false;
+  }
+  if (adminNavOverlay && isMobileViewport()) {
+    adminNavOverlay.hidden = !isOpen;
+    adminNavOverlay.classList.toggle('is-active', Boolean(isOpen));
+  } else if (adminNavOverlay) {
+    adminNavOverlay.hidden = true;
+    adminNavOverlay.classList.remove('is-active');
+  }
+  document.body.classList.toggle('admin-nav-lock', isMobileViewport() && Boolean(isOpen));
+}
+
+function syncMobileNavState() {
+  if (!isMobileViewport()) {
+    setMobileNavOpenState(true);
+    return;
+  }
+  setMobileNavOpenState(false);
+}
 
 function normalizeAvatarUrl(value) {
   const raw = String(value || '').trim();
@@ -272,6 +319,7 @@ function renderDashboardSpokes(activeUsers = []) {
   activeUsers.forEach((user, index) => {
     const role = (user.role || 'fieldman').toLowerCase();
     const angle = -90 + angleStep * index;
+    const mobile = isMobileViewport();
 
     const spoke = document.createElement('div');
     spoke.className = `dashboard-spoke ${role}`;
@@ -279,11 +327,14 @@ function renderDashboardSpokes(activeUsers = []) {
     spoke.style.setProperty('--delay', `${(index * 0.07).toFixed(2)}s`);
     spoke.style.setProperty('--exit-delay', '0s');
 
-    const baseLength = role === 'fieldman' ? 244 : 202;
+    const baseLength = mobile
+      ? (role === 'fieldman' ? 104 : 94)
+      : (role === 'fieldman' ? 244 : 202);
     const lengthPattern = [-20, -8, 6, 18, -12, 10, 2, -16, 22, -4, 14, -10, 26, -18, 8, 16, -6, 20];
-    const roleBias = role === 'fieldman' ? 8 : -4;
+    const roleBias = mobile ? (role === 'fieldman' ? 4 : -2) : (role === 'fieldman' ? 8 : -4);
     const jitter = lengthPattern[index % lengthPattern.length] + roleBias;
-    spoke.style.setProperty('--length', `${Math.max(110, baseLength + jitter)}px`);
+    const minLength = mobile ? 62 : 110;
+    spoke.style.setProperty('--length', `${Math.max(minLength, baseLength + jitter)}px`);
 
     const line = document.createElement('span');
     line.className = 'spoke-line';
@@ -558,6 +609,9 @@ function requestGeolocationAccess() {
 }
 
 async function activateFieldmanLocationMode() {
+  setOverlayPanelCollapsed(fieldmanLeftOverlayPanel, fieldmanLeftOverlayToggle, 'left', true);
+  setOverlayPanelCollapsed(fieldmanRightOverlayPanel, fieldmanRightOverlayToggle, 'right', true);
+
   // Render the base map immediately so the panel never appears as a blank white area.
   renderFieldmanLocations([], { inPhilippinesCount: 0, excludedOutOfPhilippinesCount: 0 });
 
@@ -668,6 +722,35 @@ function ensureFieldmanMap() {
   window.setTimeout(() => {
     fieldmanMapInstance.invalidateSize();
   }, 100);
+}
+
+function setOverlayPanelCollapsed(panel, toggleButton, direction, collapsed) {
+  if (!panel || !toggleButton) return;
+  panel.classList.toggle('is-collapsed', Boolean(collapsed));
+  toggleButton.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (direction === 'left') {
+    toggleButton.textContent = collapsed ? '»' : '«';
+  } else {
+    toggleButton.textContent = collapsed ? '«' : '»';
+  }
+
+  if (direction === 'left' && fieldmanLeftEdgeArrow) {
+    fieldmanLeftEdgeArrow.hidden = !collapsed;
+  }
+  if (direction === 'right' && fieldmanRightEdgeArrow) {
+    fieldmanRightEdgeArrow.hidden = !collapsed;
+  }
+}
+
+function toggleOverlayPanel(panel, toggleButton, direction) {
+  if (!panel || !toggleButton) return;
+  const collapsed = !panel.classList.contains('is-collapsed');
+  setOverlayPanelCollapsed(panel, toggleButton, direction, collapsed);
+  if (fieldmanMapInstance) {
+    window.setTimeout(() => {
+      fieldmanMapInstance.invalidateSize();
+    }, 230);
+  }
 }
 
 function getMarkerVisualByZoom(zoomValue) {
@@ -890,7 +973,6 @@ function renderFieldmanLocations(items, summary) {
       const popupRole = escapeHtml((item.role || 'fieldman').toUpperCase());
       const popupStatus = escapeHtml(getStatusLabel(status));
       const popupAddress = String(item.address || '').trim() || 'Address unavailable';
-      const sourceQuality = getLocationSourceQuality(item.source);
       const spoofingWarning = item.spoofingDetected
         ? `<br /><span style="color: #ff6b6b; font-weight: bold;">⚠️ SUSPICIOUS LOCATION</span>`
         : '';
@@ -903,7 +985,6 @@ function renderFieldmanLocations(items, summary) {
           <strong>${popupTitle}</strong><br />
           <span>${popupRole}</span><br />
           <span>Status: ${popupStatus}</span><br />
-          <span class="fieldman-chip fieldman-source-chip ${sourceQuality.className}" title="${escapeHtml(sourceQuality.description)}">Source: ${escapeHtml(sourceQuality.label)}</span><br />
           <span>Address: ${escapeHtml(popupAddress)}</span><br />
           <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
           ${spoofingWarning}
@@ -937,7 +1018,6 @@ function renderFieldmanLocations(items, summary) {
           ? `${lat.toFixed(4)}, ${lng.toFixed(4)}`
           : 'No coordinates';
         const accuracyText = Number.isFinite(accuracy) ? `${accuracy.toFixed(1)}m` : 'n/a';
-        const sourceQuality = getLocationSourceQuality(item.source);
         const spoofingAlert = item.spoofingDetected
           ? '<span class="fieldman-chip is-spoofed" style="background-color: #ff6b6b; color: white;">⚠️ SUSPICIOUS</span>'
           : '';
@@ -951,7 +1031,6 @@ function renderFieldmanLocations(items, summary) {
             <div class="fieldman-row-meta">
               <span class="fieldman-role-chip role-${role}">${role.toUpperCase()}</span>
               <span class="fieldman-chip is-${escapeHtml(status)}">${getStatusLabel(status)}</span>
-              <span class="fieldman-chip fieldman-source-chip ${sourceQuality.className}" title="${escapeHtml(sourceQuality.description)}">${escapeHtml(sourceQuality.label)}</span>
               ${spoofingAlert}
               <span>Accuracy: ${escapeHtml(accuracyText)}</span>
               <span>Updated: ${escapeHtml(formatRelativeTime(item.capturedAt))}</span>
@@ -1271,6 +1350,25 @@ function renderApprovalActivityItems(items) {
     </div>
   `;
 
+  const getAllowedRoleTarget = (item, normalizedRole) => {
+    if (!canManageLarkUsers) return null;
+    if (item.isMainAdminIdentity) return null;
+
+    if (isMainAdminOperator) {
+      return normalizedRole === 'admin' ? 'fieldman' : 'admin';
+    }
+
+    if (normalizedRole === 'fieldman') {
+      return 'admin';
+    }
+
+    if (normalizedRole === 'admin' && String(item.userId || '') === String(currentAccessUserId || '')) {
+      return 'fieldman';
+    }
+
+    return null;
+  };
+
   approvalActivityList.innerHTML = headerHtml + items.map((item, index) => {
     const name = escapeHtml(item.name || 'Unknown User');
     const rawLarkId = String(item.larkId || 'N/A');
@@ -1291,17 +1389,22 @@ function renderApprovalActivityItems(items) {
     const deviceText = escapeHtml(item.device || 'N/A');
     const normalizedRole = String(item.role || 'fieldman').toLowerCase() === 'admin' ? 'admin' : 'fieldman';
     const role = escapeHtml(normalizedRole.toUpperCase());
-    const suggestedRole = normalizedRole === 'admin' ? 'fieldman' : 'admin';
+    const roleTarget = getAllowedRoleTarget(item, normalizedRole);
+    const roleActionLabel = roleTarget === 'admin' ? 'Make Admin' : roleTarget === 'fieldman' ? 'Make Fieldman' : '';
     const userId = escapeHtml(String(item.userId || ''));
     const userName = escapeHtml(String(item.name || 'Unknown User'));
-    const disableManage = Boolean(item.isSelf || item.isMainAdminIdentity);
-    const actionsHtml = canManageLarkUsers
+    const canDelete = canDeleteLarkUsers && !item.isSelf && !item.isMainAdminIdentity;
+    const actionsHtml = roleTarget || canDelete
       ? `
         <div class="approval-kebab" data-user-actions="${userId}">
-          <button class="approval-kebab-btn" type="button" data-action="toggle-user-menu" data-user-id="${userId}" aria-haspopup="menu" aria-expanded="false" aria-label="Open actions menu for ${userName}" ${disableManage ? 'disabled' : ''}>...</button>
+          <button class="approval-kebab-btn" type="button" data-action="toggle-user-menu" data-user-id="${userId}" aria-haspopup="menu" aria-expanded="false" aria-label="Open actions menu for ${userName}">...</button>
           <div class="approval-kebab-menu" role="menu" hidden>
-            <button class="approval-kebab-item" type="button" role="menuitem" data-action="edit-user-role" data-user-id="${userId}" data-user-name="${userName}" data-current-role="${normalizedRole}" data-role-target="${suggestedRole}" ${disableManage ? 'disabled' : ''}>Edit Role</button>
-            <button class="approval-kebab-item" type="button" role="menuitem" data-status="danger" data-action="delete-user" data-user-id="${userId}" data-user-name="${userName}" ${disableManage ? 'disabled' : ''}>Delete</button>
+            ${roleTarget
+              ? `<button class="approval-kebab-item" type="button" role="menuitem" data-action="edit-user-role" data-user-id="${userId}" data-user-name="${userName}" data-current-role="${normalizedRole}" data-role-target="${roleTarget}">${roleActionLabel}</button>`
+              : ''}
+            ${canDelete
+              ? `<button class="approval-kebab-item" type="button" role="menuitem" data-status="danger" data-action="delete-user" data-user-id="${userId}" data-user-name="${userName}">Delete</button>`
+              : ''}
           </div>
         </div>
       `
@@ -1319,7 +1422,10 @@ function renderApprovalActivityItems(items) {
           </div>
         </div>
         <div class="approval-col-meta">
-          <span class="approval-chip is-${statusClass}">${statusLabel}</span>
+          <div class="approval-meta-status-line">
+            <span class="approval-chip is-${statusClass}">${statusLabel}</span>
+            <span class="approval-inline-role">${role}</span>
+          </div>
         </div>
         <div class="approval-col-meta">
           <div class="approval-meta-row"><span>Date:</span> ${dateText}</div>
@@ -1330,7 +1436,7 @@ function renderApprovalActivityItems(items) {
         </div>
         <div class="approval-col-actions">
           <div class="approval-role-actions-line">
-            <div class="approval-meta-row">${role}</div>
+            <div class="approval-meta-row approval-role-label">${role}</div>
             ${actionsHtml}
           </div>
         </div>
@@ -1459,7 +1565,10 @@ async function loadApprovalAccessActivity() {
     const data = await response.json();
     if (requestView !== currentApprovalView) return;
 
-    canManageLarkUsers = Boolean(data.canManageUsers);
+    canManageLarkUsers = Boolean(data.canManageRoleChanges);
+    canDeleteLarkUsers = Boolean(data.canManageUsers);
+    isMainAdminOperator = Boolean(data.isMainAdminRequester);
+    currentAccessUserId = String(data.currentUserId || '');
     loadedApprovalActivityItems = Array.isArray(data.items) ? data.items : [];
     processAndRenderActivityItems();
     const summary = data.summary || {};
@@ -1470,6 +1579,9 @@ async function loadApprovalAccessActivity() {
   } catch (error) {
     if (requestView !== currentApprovalView) return;
     canManageLarkUsers = false;
+    canDeleteLarkUsers = false;
+    isMainAdminOperator = false;
+    currentAccessUserId = '';
     loadedApprovalActivityItems = [];
     processAndRenderActivityItems();
     setApprovalStatus(error instanceof Error ? error.message : 'Failed to load access activity records.');
@@ -1594,8 +1706,42 @@ navLinks.forEach((link) => {
       window.history.pushState({}, '', href);
     }
     applyMode(mode);
+    if (isMobileViewport()) {
+      setMobileNavOpenState(false);
+    }
   });
 });
+
+if (adminNavToggle) {
+  adminNavToggle.addEventListener('click', () => {
+    const nextOpenState = !adminNav?.classList.contains('is-open');
+    setMobileNavOpenState(nextOpenState);
+  });
+}
+
+document.addEventListener('click', (event) => {
+  if (!isMobileViewport()) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (adminNavToggle?.contains(target)) return;
+  if (adminNav?.contains(target)) return;
+  setMobileNavOpenState(false);
+});
+
+document.addEventListener('keydown', (event) => {
+  if (!isMobileViewport()) return;
+  if (event.key !== 'Escape') return;
+  setMobileNavOpenState(false);
+});
+
+if (adminNavOverlay) {
+  adminNavOverlay.addEventListener('click', () => {
+    setMobileNavOpenState(false);
+  });
+}
+
+window.addEventListener('resize', syncMobileNavState);
+syncMobileNavState();
 
 const leaveAdminLinks = Array.from(document.querySelectorAll('a[href]'));
 leaveAdminLinks.forEach((anchor) => {
@@ -1626,6 +1772,30 @@ window.addEventListener('pagehide', () => {
 if (fieldmanRefreshBtn) {
   fieldmanRefreshBtn.addEventListener('click', () => {
     activateFieldmanLocationMode();
+  });
+}
+
+if (fieldmanLeftOverlayToggle) {
+  fieldmanLeftOverlayToggle.addEventListener('click', () => {
+    toggleOverlayPanel(fieldmanLeftOverlayPanel, fieldmanLeftOverlayToggle, 'left');
+  });
+}
+
+if (fieldmanRightOverlayToggle) {
+  fieldmanRightOverlayToggle.addEventListener('click', () => {
+    toggleOverlayPanel(fieldmanRightOverlayPanel, fieldmanRightOverlayToggle, 'right');
+  });
+}
+
+if (fieldmanLeftEdgeArrow) {
+  fieldmanLeftEdgeArrow.addEventListener('click', () => {
+    toggleOverlayPanel(fieldmanLeftOverlayPanel, fieldmanLeftOverlayToggle, 'left');
+  });
+}
+
+if (fieldmanRightEdgeArrow) {
+  fieldmanRightEdgeArrow.addEventListener('click', () => {
+    toggleOverlayPanel(fieldmanRightOverlayPanel, fieldmanRightOverlayToggle, 'right');
   });
 }
 
@@ -1717,10 +1887,7 @@ if (approvalActivityList) {
       if (action === 'edit-user-role') {
         const currentRole = String(actionButton.dataset.currentRole || '').toLowerCase();
         const suggestedRole = String(actionButton.dataset.roleTarget || (currentRole === 'admin' ? 'fieldman' : 'admin')).toLowerCase();
-        const roleInput = window.prompt(`Edit role for ${userName}. Enter admin or fieldman:`, suggestedRole);
-        if (roleInput === null) return;
-
-        const roleTarget = roleInput.trim().toLowerCase();
+        const roleTarget = suggestedRole;
         if (roleTarget !== 'admin' && roleTarget !== 'fieldman') return;
         if (roleTarget === currentRole) {
           closeApprovalActionMenus();

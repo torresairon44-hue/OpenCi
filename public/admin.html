@@ -1,157 +1,172 @@
-  <!doctype html>
+<!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenCI Admin Console</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
-      rel="stylesheet"
-    />
-    <link
-      rel="stylesheet"
-      href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
-      crossorigin="anonymous"
-    />
-    <link rel="stylesheet" href="/admin.css" />
-  </head>
-  <body>
-    <main class="admin-shell">
-      <div class="nebula"></div>
-      <section class="admin-card" aria-label="Admin analytics panel">
-        <aside class="admin-nav" aria-label="Admin navigation">
-          <p class="nav-kicker">Admin</p>
-          <h1 class="nav-title">OpenCI Base</h1>
-          <nav>
-            <span class="nav-indicator" id="navIndicator" aria-hidden="true"></span>
-            <a class="nav-link is-active" data-mode="learn" href="/admin/dashboard">Dashboard</a>
-            <a class="nav-link" data-mode="prepare" href="/admin/fieldman-location">Fieldman Location</a>
-            <a class="nav-link" data-mode="sensor" href="/admin/admin-approve">Admin Approve</a>
-            <a class="nav-link" data-mode="execute" href="/admin/activity-log">Activity Log</a>
-          </nav>
-          <div class="nav-user">
-            <div class="avatar" id="adminUserAvatarShell">
-              <img src="/assets/branding/ci.png" alt="Admin profile" id="adminUserAvatarImg" />
-            </div>
-            <div>
-              <p class="user-name" id="adminUserName">Admin User</p>
-              <a class="user-role user-back-link" href="/">Go Back to Chat</a>
-            </div>
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OpenCI Admin Console</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css"
+    crossorigin="anonymous" />
+  <link rel="stylesheet" href="/admin.css" />
+</head>
+
+<body>
+  <main class="admin-shell">
+    <div class="nebula"></div>
+    <section class="admin-card" aria-label="Admin analytics panel">
+      <aside class="admin-nav" aria-label="Admin navigation">
+        <p class="nav-kicker">Admin</p>
+        <h1 class="nav-title">OpenCI Base</h1>
+        <nav id="adminNavLinks">
+          <span class="nav-indicator" id="navIndicator" aria-hidden="true"></span>
+          <a class="nav-link is-active" data-mode="learn" href="/admin/dashboard">Dashboard</a>
+          <a class="nav-link" data-mode="prepare" href="/admin/fieldman-location">Fieldman Location</a>
+          <a class="nav-link" data-mode="sensor" href="/admin/admin-approve">Admin Approve</a>
+          <a class="nav-link" data-mode="execute" href="/admin/activity-log">Activity Log</a>
+        </nav>
+        <div class="nav-user">
+          <div class="avatar" id="adminUserAvatarShell">
+            <img src="/assets/branding/ci.png" alt="Admin profile" id="adminUserAvatarImg" />
           </div>
-        </aside>
+          <div>
+            <p class="user-name" id="adminUserName">Admin User</p>
+            <a class="user-role user-back-link" href="/">Go Back to Chat</a>
+          </div>
+        </div>
+      </aside>
+      <button class="nav-toggle" id="adminNavToggle" type="button" aria-expanded="false"
+        aria-controls="adminNavLinks">Menu</button>
+      <div class="admin-nav-overlay" id="adminNavOverlay" hidden></div>
 
-        <section class="admin-canvas" aria-label="Admin workspace">
-          <p class="canvas-kicker">Admin Workspace</p>
-          <h2 class="canvas-title" id="modeLabel">Dashboard</h2>
-          <p class="canvas-note" id="modeNote">Use the left navigation to open each admin page.</p>
+      <section class="admin-canvas" aria-label="Admin workspace">
+        <p class="canvas-kicker">Admin Workspace</p>
+        <h2 class="canvas-title" id="modeLabel">Dashboard</h2>
+        <p class="canvas-note" id="modeNote">Use the left navigation to open each admin page.</p>
 
-          <div class="dashboard-panel" id="dashboardPanel">
-            <div class="dashboard-radial" id="dashboardRadial" style="--admin-ratio: 0.4; --fieldman-ratio: 0.6;">
-              <div class="radial-pulse"></div>
-              <div class="radial-stars" aria-hidden="true"></div>
-              <div class="radial-core">
-                <span class="core-label">TOTAL</span>
-                <strong id="kpiTotalUsers">0</strong>
-              </div>
-              <div class="radial-orbit"></div>
-              <div class="dashboard-spokes" id="dashboardSpokes" aria-hidden="true"></div>
+        <div class="dashboard-panel" id="dashboardPanel">
+          <div class="dashboard-radial" id="dashboardRadial" style="--admin-ratio: 0.4; --fieldman-ratio: 0.6;">
+            <div class="radial-pulse"></div>
+            <div class="radial-stars" aria-hidden="true"></div>
+            <div class="radial-core">
+              <span class="core-label">TOTAL</span>
+              <strong id="kpiTotalUsers">0</strong>
             </div>
+            <div class="radial-orbit"></div>
+            <div class="dashboard-spokes" id="dashboardSpokes" aria-hidden="true"></div>
+          </div>
 
-            <div class="dashboard-metrics">
-              <article class="metric-card">
-                <p>Admin</p>
-                <h3 id="kpiAdminCount">0</h3>
-              </article>
-              <article class="metric-card">
-                <p>Fieldman</p>
-                <h3 id="kpiFieldmanCount">0</h3>
-              </article>
-              <article class="metric-card">
-                <p>Pending Requests</p>
-                <h3 id="kpiPendingCount">0</h3>
-              </article>
-              <article class="metric-card">
-                <p>Approval Rate</p>
-                <h3><span id="kpiApprovalRate">0</span>%</h3>
-              </article>
-            </div>
-
-            <!-- Floating Detail Panel (Standing & Decoupled) -->
-            <article id="userHoverDetail" class="metric-card user-detail-card floating-card" hidden>
-              <div id="userDetailContent"></div>
+          <div class="dashboard-metrics">
+            <article class="metric-card">
+              <p>Admin</p>
+              <h3 id="kpiAdminCount">0</h3>
+            </article>
+            <article class="metric-card">
+              <p>Fieldman</p>
+              <h3 id="kpiFieldmanCount">0</h3>
+            </article>
+            <article class="metric-card">
+              <p>Pending Requests</p>
+              <h3 id="kpiPendingCount">0</h3>
+            </article>
+            <article class="metric-card">
+              <p>Approval Rate</p>
+              <h3><span id="kpiApprovalRate">0</span>%</h3>
             </article>
           </div>
 
-          <div class="fieldman-location-panel" id="fieldmanLocationPanel" hidden>
-            <div class="fieldman-map" role="img" aria-label="Philippines fieldman map with session location pins">
-              <div class="fieldman-map-stage" id="fieldmanLocationMap"></div>
+          <!-- Floating Detail Panel (Standing & Decoupled) -->
+          <article id="userHoverDetail" class="metric-card user-detail-card floating-card" hidden>
+            <div id="userDetailContent"></div>
+          </article>
+        </div>
 
-              <div class="fieldman-map-overlay fieldman-map-overlay-left">
-                <h3>Philippines Fieldman Map</h3>
-                <p class="fieldman-location-subtitle">Live location pins from authenticated fieldman and admin sessions.</p>
-                <p class="fieldman-location-status" id="fieldmanLocationStatus">Loading Philippines map positions...</p>
+        <div class="fieldman-location-panel" id="fieldmanLocationPanel" hidden>
+          <div class="fieldman-map" role="img" aria-label="Philippines fieldman map with session location pins">
+            <div class="fieldman-map-stage" id="fieldmanLocationMap"></div>
+
+            <div class="fieldman-map-overlay fieldman-map-overlay-left">
+              <button class="fieldman-overlay-toggle fieldman-overlay-toggle-left" id="fieldmanLeftOverlayToggle"
+                type="button" aria-expanded="true" aria-label="Collapse map info panel">◀</button>
+              <h3>Philippines Fieldman Map</h3>
+              <p class="fieldman-location-subtitle">Live location pins from authenticated fieldman and admin sessions.
+              </p>
+              <p class="fieldman-location-status" id="fieldmanLocationStatus">Loading Philippines map positions...</p>
+            </div>
+
+            <div class="fieldman-map-overlay fieldman-map-overlay-right">
+              <button class="fieldman-overlay-toggle fieldman-overlay-toggle-right" id="fieldmanRightOverlayToggle"
+                type="button" aria-expanded="true" aria-label="Collapse map actions panel">▶</button>
+              <div class="fieldman-location-actions">
+                <button class="fieldman-refresh" id="fieldmanRefreshBtn" type="button">Refresh</button>
               </div>
 
-              <div class="fieldman-map-overlay fieldman-map-overlay-right">
-                <div class="fieldman-location-actions">
-                  <button class="fieldman-refresh" id="fieldmanRefreshBtn" type="button">Refresh</button>
-                </div>
+              <div class="fieldman-location-legend" aria-label="Marker legend">
+                <span class="legend-chip active">Active</span>
+                <span class="legend-chip offline">Offline</span>
+                <span class="legend-chip recent">Recent</span>
+              </div>
+            </div>
 
-                <div class="fieldman-location-legend" aria-label="Marker legend">
-                  <span class="legend-chip active">Active</span>
-                  <span class="legend-chip offline">Offline</span>
-                  <span class="legend-chip recent">Recent</span>
-                </div>
+            <button class="fieldman-side-arrow fieldman-side-arrow-left" id="fieldmanLeftEdgeArrow" type="button"
+              aria-label="Open map info panel" hidden>▶</button>
+            <button class="fieldman-side-arrow fieldman-side-arrow-right" id="fieldmanRightEdgeArrow" type="button"
+              aria-label="Open map actions panel" hidden>◀</button>
+          </div>
+        </div>
+
+        <div class="approval-panel" id="adminApprovePanel" hidden>
+          <div class="approval-panel-header">
+            <div class="approval-header-title">
+              <h3 id="approvalTitle">Lark Users</h3>
+              <p class="approval-subtitle" id="approvalSubtitle">Live and recent login activity with status, timestamps,
+                device, and role records.</p>
+            </div>
+            <div class="approval-header-actions">
+              <button class="approval-view-btn" id="approvalToggleBtn" type="button"
+                data-next-view="queue">Approval</button>
+              <span class="approval-count" id="approvalCount">0</span>
+              <button class="approval-refresh" id="approvalRefreshBtn" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div class="approval-toolbar" id="approvalToolbar">
+            <div class="approval-filters" id="approvalFilters">
+              <button class="approval-filter is-active" type="button" data-status="pending">Pending</button>
+              <button class="approval-filter" type="button" data-status="approved">Approved</button>
+              <button class="approval-filter" type="button" data-status="rejected">Rejected</button>
+            </div>
+
+            <div class="approval-search-sort" id="approvalSearchSort">
+              <div class="search-wrap">
+                <input type="text" id="approvalSearchInput" placeholder="Search accounts..." spellcheck="false"
+                  autocomplete="off" />
+              </div>
+              <div class="sort-wrap">
+                <select id="approvalSortSelect">
+                  <option value="newest">Newest First</option>
+                  <option value="oldest">Oldest First</option>
+                  <option value="name-asc">Name (A-Z)</option>
+                  <option value="name-desc">Name (Z-A)</option>
+                </select>
               </div>
             </div>
           </div>
 
-          <div class="approval-panel" id="adminApprovePanel" hidden>
-            <div class="approval-panel-header">
-              <div class="approval-header-title">
-                <h3 id="approvalTitle">Lark Users</h3>
-                <p class="approval-subtitle" id="approvalSubtitle">Live and recent login activity with status, timestamps, device, and role records.</p>
-              </div>
-              <div class="approval-header-actions">
-                <button class="approval-view-btn" id="approvalToggleBtn" type="button" data-next-view="queue">Approval</button>
-                <span class="approval-count" id="approvalCount">0</span>
-                <button class="approval-refresh" id="approvalRefreshBtn" type="button">Refresh</button>
-              </div>
-            </div>
-
-            <div class="approval-toolbar" id="approvalToolbar">
-              <div class="approval-filters" id="approvalFilters">
-                <button class="approval-filter is-active" type="button" data-status="pending">Pending</button>
-                <button class="approval-filter" type="button" data-status="approved">Approved</button>
-                <button class="approval-filter" type="button" data-status="rejected">Rejected</button>
-              </div>
-
-              <div class="approval-search-sort" id="approvalSearchSort">
-                <div class="search-wrap">
-                  <input type="text" id="approvalSearchInput" placeholder="Search accounts..." spellcheck="false" autocomplete="off" />
-                </div>
-                <div class="sort-wrap">
-                  <select id="approvalSortSelect">
-                    <option value="newest">Newest First</option>
-                    <option value="oldest">Oldest First</option>
-                    <option value="name-asc">Name (A-Z)</option>
-                    <option value="name-desc">Name (Z-A)</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <p class="approval-status" id="approvalStatusText">Loading requests...</p>
-            <div class="approval-list" id="approvalList"></div>
-            <div class="approval-list approval-activity-list" id="approvalActivityList" hidden></div>
-          </div>
-        </section>
+          <p class="approval-status" id="approvalStatusText">Loading requests...</p>
+          <div class="approval-list" id="approvalList"></div>
+          <div class="approval-list approval-activity-list" id="approvalActivityList" hidden></div>
+        </div>
       </section>
-    </main>
+    </section>
+  </main>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js" defer crossorigin="anonymous"></script>
-    <script src="/admin.js" defer></script>
-  </body>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js" defer crossorigin="anonymous"></script>
+  <script src="/admin.js" defer></script>
+</body>
+
 </html>
