@@ -24,6 +24,10 @@ let pendingImages = [];
 const LANDING_STATE_FADE_MS = 280;
 const DEFAULT_CHAT_TITLE = 'OpenCI Help Desk';
 const LOCATION_CACHE_KEY = 'lastKnownLocationPayload';
+const LOCATION_CACHE_TTL_MS = 2 * 60 * 1000;
+const LOCATION_REFRESH_COOLDOWN_MS = 1500;
+const MANUAL_PRECISE_ACCURACY_METERS = 80;
+const MANUAL_PRECISION_WAIT_MS = 5000;
 const USER_AVATAR_LARK_KEY = 'userAvatarLarkUrl';
 const USER_AVATAR_CUSTOM_KEY = 'userAvatarCustomUrl';
 const USER_AVATAR_SOURCE_KEY = 'userAvatarSource';
@@ -33,6 +37,13 @@ let sessionHeartbeatTimer = null;
 let locationWatchId = null; // For continuous GPS tracking
 let lastSyncedLocationPayload = null; // Track last synced location to avoid redundant updates
 let shouldResetLocationOnNextSync = false;
+let locationRefreshInFlight = false;
+let activeLocationRequestId = 0;
+let lastManualLocationRefreshAtMs = 0;
+let queuedManualRefresh = false;
+let queuedManualRefreshTimer = null;
+let manualPrecisionDeadlineMs = 0;
+let manualPrecisionTimeoutTimer = null;
 
 // ───────────────────────────────────────────────────────────────────
 // DOM ELEMENTS
@@ -583,9 +594,47 @@ function setupEventListeners() {
 
   // Reload location
   reloadLocationBtn.addEventListener('click', () => {
-    currentUserLocation = 'Searching...';
-    updateProfileUI();
-    getUserLocation();
+    const now = Date.now();
+    const triggerManualRefresh = () => {
+      lastManualLocationRefreshAtMs = Date.now();
+      currentUserLocation = 'Searching...';
+      updateProfileUI();
+      getUserLocation({ manualRefresh: true });
+    };
+
+    const queueManualRefreshAfter = (waitMs) => {
+      queuedManualRefresh = true;
+      currentUserLocation = 'Refresh queued...';
+      updateProfileUI();
+      if (queuedManualRefreshTimer) {
+        window.clearTimeout(queuedManualRefreshTimer);
+      }
+      queuedManualRefreshTimer = window.setTimeout(() => {
+        queuedManualRefreshTimer = null;
+        if (!queuedManualRefresh || locationRefreshInFlight) {
+          return;
+        }
+        queuedManualRefresh = false;
+        triggerManualRefresh();
+      }, Math.max(0, waitMs));
+    };
+
+    if (locationRefreshInFlight) {
+      queueManualRefreshAfter(LOCATION_REFRESH_COOLDOWN_MS);
+      return;
+    }
+
+    if ((now - lastManualLocationRefreshAtMs) < LOCATION_REFRESH_COOLDOWN_MS) {
+      queueManualRefreshAfter(LOCATION_REFRESH_COOLDOWN_MS - (now - lastManualLocationRefreshAtMs) + 20);
+      return;
+    }
+
+    queuedManualRefresh = false;
+    if (queuedManualRefreshTimer) {
+      window.clearTimeout(queuedManualRefreshTimer);
+      queuedManualRefreshTimer = null;
+    }
+    triggerManualRefresh();
   });
 
   if (adminDashboardProfileLink) {
@@ -2087,7 +2136,7 @@ function startSessionHeartbeat() {
   }, 1200);
   sessionHeartbeatTimer = window.setInterval(() => {
     heartbeatWithLocation();
-  }, 10000);
+  }, 30000);
 }
 
 function stopSessionOnExit() {
@@ -2121,6 +2170,7 @@ function cacheLastKnownLocation(locationPayload) {
       JSON.stringify({
         lat: Number(lat.toFixed(6)),
         lng: Number(lng.toFixed(6)),
+        savedAt: Date.now(),
         accuracyMeters: Number.isFinite(Number(locationPayload.accuracyMeters))
           ? Number(Number(locationPayload.accuracyMeters).toFixed(1))
           : null,
@@ -2138,7 +2188,14 @@ function readCachedLocation() {
     const parsed = JSON.parse(raw);
     const lat = Number(parsed?.lat);
     const lng = Number(parsed?.lng);
+    const savedAt = Number(parsed?.savedAt);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    if (!Number.isFinite(savedAt)) return null;
+
+    if ((Date.now() - savedAt) > LOCATION_CACHE_TTL_MS) {
+      localStorage.removeItem(LOCATION_CACHE_KEY);
+      return null;
+    }
 
     const accuracy = Number(parsed?.accuracyMeters);
     return {
@@ -2346,6 +2403,39 @@ async function processGeoPosition(position, source = 'browser-gps') {
     spoofingReason: spoofCheck.reason || null,
   };
 
+  const isWithinManualPrecisionWindow = manualPrecisionDeadlineMs > 0 && Date.now() < manualPrecisionDeadlineMs;
+  const isPreciseEnoughForManual = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= MANUAL_PRECISE_ACCURACY_METERS;
+  if (isWithinManualPrecisionWindow && !isPreciseEnoughForManual) {
+    currentUserLocation = 'Refining GPS fix...';
+    updateProfileUI();
+    if (lastSyncedLocationPayload) {
+      await syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true });
+    }
+    if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    return;
+  }
+
+  if (isPreciseEnoughForManual) {
+    if (manualPrecisionTimeoutTimer) {
+      window.clearTimeout(manualPrecisionTimeoutTimer);
+      manualPrecisionTimeoutTimer = null;
+    }
+    manualPrecisionDeadlineMs = 0;
+  }
+
+  if (spoofCheck.spoofed) {
+    // Do not expose suspicious coordinates in UI to avoid confusion.
+    currentUserLocation = 'Location error (suspicious reading ignored)';
+    updateProfileUI();
+    if (lastSyncedLocationPayload) {
+      await syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true });
+    } else {
+      await syncSessionLocation(null, { heartbeat: true });
+    }
+    if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    return;
+  }
+
   // Only use reasonably accurate fixes for velocity history.
   if (hasReliableFix) {
     addToLocationHistory(latitude, longitude);
@@ -2353,10 +2443,7 @@ async function processGeoPosition(position, source = 'browser-gps') {
 
   // Format coordinates with accuracy indicator for display
   let displayLocation = `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
-  if (spoofCheck.spoofed) {
-    displayLocation += ' (suspicious)';
-    console.warn('Location spoofing detected:', spoofCheck.reason);
-  } else if (accuracyMeters && accuracyMeters > MIN_ACCURACY_THRESHOLD) {
+  if (accuracyMeters && accuracyMeters > MIN_ACCURACY_THRESHOLD) {
     displayLocation += ' (low accuracy)';
   }
   
@@ -2407,13 +2494,77 @@ function startLocationWatch() {
  * Get user location - uses watchPosition for continuous tracking when logged in.
  * Falls back to getCurrentPosition for one-time anonymous usage.
  */
-async function getUserLocation() {
+async function getUserLocation(options = {}) {
+  const requestId = ++activeLocationRequestId;
+  const manualRefresh = options?.manualRefresh === true;
+  if (manualRefresh) {
+    if (manualPrecisionTimeoutTimer) {
+      window.clearTimeout(manualPrecisionTimeoutTimer);
+      manualPrecisionTimeoutTimer = null;
+    }
+    manualPrecisionDeadlineMs = Date.now() + MANUAL_PRECISION_WAIT_MS;
+    manualPrecisionTimeoutTimer = window.setTimeout(() => {
+      manualPrecisionTimeoutTimer = null;
+      if (manualPrecisionDeadlineMs <= 0) {
+        return;
+      }
+
+      manualPrecisionDeadlineMs = 0;
+      if (currentUserLocation === 'Refining GPS fix...') {
+        if (lastSyncedLocationPayload) {
+          currentUserLocation = `${Number(lastSyncedLocationPayload.lat).toFixed(4)}, ${Number(lastSyncedLocationPayload.lng).toFixed(4)} (best available)`;
+        } else {
+          currentUserLocation = 'Location temporarily low accuracy';
+        }
+        updateProfileUI();
+      }
+    }, MANUAL_PRECISION_WAIT_MS + 120);
+  }
+
+  const isLatestRequest = () => requestId === activeLocationRequestId;
+  const finishRequest = () => {
+    if (!isLatestRequest()) return;
+    locationRefreshInFlight = false;
+    if (reloadLocationBtn) {
+      reloadLocationBtn.classList.remove('spinning');
+      reloadLocationBtn.disabled = false;
+    }
+
+    if (queuedManualRefresh) {
+      const waitMs = Math.max(0, LOCATION_REFRESH_COOLDOWN_MS - (Date.now() - lastManualLocationRefreshAtMs));
+      queuedManualRefresh = false;
+      if (queuedManualRefreshTimer) {
+        window.clearTimeout(queuedManualRefreshTimer);
+      }
+      queuedManualRefreshTimer = window.setTimeout(() => {
+        queuedManualRefreshTimer = null;
+        if (locationRefreshInFlight) {
+          queuedManualRefresh = true;
+          return;
+        }
+        lastManualLocationRefreshAtMs = Date.now();
+        currentUserLocation = 'Searching...';
+        updateProfileUI();
+        getUserLocation({ manualRefresh: true });
+      }, waitMs);
+    }
+  };
+
+  locationRefreshInFlight = true;
   if (reloadLocationBtn) {
     reloadLocationBtn.classList.add('spinning');
+    reloadLocationBtn.disabled = true;
   }
   
   if (!navigator.geolocation) {
-    const usedCachedLocation = await applyCachedLocationFallback(null);
+    if (!isLatestRequest()) {
+      finishRequest();
+      return;
+    }
+
+    const usedCachedLocation = isLoggedIn
+      ? false
+      : await applyCachedLocationFallback(null);
     const usedApproximateLocation = usedCachedLocation
       ? false
       : await applyApproximateIpLocationFallback(null);
@@ -2421,29 +2572,52 @@ async function getUserLocation() {
       currentUserLocation = 'Geolocation not supported';
       updateProfileUI();
     }
-    if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    finishRequest();
     return;
   }
   
   // First, get an immediate position
   navigator.geolocation.getCurrentPosition(
     async (position) => {
-      await processGeoPosition(position, 'browser-gps');
+      if (!isLatestRequest()) {
+        return;
+      }
+
+      await processGeoPosition(position, manualRefresh ? 'browser-gps-manual' : 'browser-gps');
       
       // Start continuous watching for logged-in users
       if (isLoggedIn) {
         startLocationWatch();
       }
+
+      finishRequest();
     },
     async (error) => {
+      if (!isLatestRequest()) {
+        return;
+      }
+
       console.log('Geolocation error:', error);
+
+      // During manual refresh spam, keep the last stable fix instead of replaying stale cached fallback.
+      if (manualRefresh && lastSyncedLocationPayload) {
+        currentUserLocation = `${Number(lastSyncedLocationPayload.lat).toFixed(4)}, ${Number(lastSyncedLocationPayload.lng).toFixed(4)} (last stable fix)`;
+        updateProfileUI();
+        await syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true });
+        finishRequest();
+        return;
+      }
+
       currentUserLocation = formatGeoErrorMessage(error);
       updateProfileUI();
-      const usedCachedLocation = await applyCachedLocationFallback(error);
+      const usedCachedLocation = isLoggedIn
+        ? false
+        : await applyCachedLocationFallback(error);
       if (!usedCachedLocation) {
         await syncSessionLocation(null, { heartbeat: true });
       }
-      if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+
+      finishRequest();
     },
     {
       enableHighAccuracy: true,
