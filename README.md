@@ -27,6 +27,12 @@ npm run dev
 
 4. Open `http://localhost:3000`.
 
+## Runtime Requirement
+
+- Production and deployment checks are pinned to Node.js `20.x`.
+- Run `node -v` and confirm it starts with `v20` before running deployment gates.
+- Local version files `.nvmrc` and `.node-version` are set to `20`.
+
 ## Runtime Modes
 
 ### Minimum mode (works fastest)

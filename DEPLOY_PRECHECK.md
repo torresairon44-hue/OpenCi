@@ -36,6 +36,12 @@ Strict gate (recommended):
 npm run deploy:check
 ```
 
+KB governance gate (must pass for release candidates):
+
+```bash
+npm run kb:verify
+```
+
 If you intentionally allow empty tests:
 
 ```bash
@@ -53,6 +59,12 @@ npm start
 Health endpoint must return status ok:
 
 - `GET /api/health`
+
+Canary policy check (fails when rollback is recommended):
+
+```bash
+npm run canary:check
+```
 
 Production hardening checks:
 

@@ -7,12 +7,14 @@ import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { createWorker } from 'tesseract.js';
 import { runQuery, executeQuery } from './database';
-import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment, AIProviderLimitError } from './ai-service';
+import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment, AIProviderLimitError, getAIRoutingMetrics } from './ai-service';
 import { getCoordinates, getLocationFromCoordinates, formatCoordinates } from './location-service';
 import { requireAuth } from './auth';
 import { chatRateLimiter, resetRateLimit } from './rate-limiter';
 import { queryChatbotLocationByName, getChatbotLocationScraperStatus } from './chatbot-location-scraper';
 import { getUserLocationByName, formatLocationResponse } from './user-location-service';
+import { evaluateCanaryPolicy } from './deployment-policy';
+import { decideAgenticRoute } from './agentic-router';
 
 // Sanitization helper
 const sanitizeInput = (input: string): string => {
@@ -1053,9 +1055,15 @@ chatRouter.post(
       let aiResponse: string;
       try {
         const imageAttachments = getImageAttachmentsFromRequest(req);
-        let locationReply = uploadedAttachments.length === 0
-          ? resolveLocationIntentFromMessage(content, (messages as any[]).slice(0, -1), false, user?.name)
-          : null;
+        const executionPlan = decideAgenticRoute({
+          message: content,
+          hasImageInput: uploadedAttachments.length > 0,
+        });
+
+        let locationReply = executionPlan.route === 'multimodal_ai'
+          ? null
+          : resolveLocationIntentFromMessage(content, (messages as any[]).slice(0, -1), false, user?.name)
+          ;
 
         // Handle async location lookup from database if scraper returned no results
         if (locationReply && locationReply.startsWith('__ASYNC_LOCATION_LOOKUP__:')) {
@@ -1187,6 +1195,10 @@ chatRouter.post(
           content: aiResponse,
         },
         ocrSummary: ocrPayload.summary,
+        executionPlan: decideAgenticRoute({
+          message: content,
+          hasImageInput: uploadedAttachments.length > 0,
+        }),
         detectedRole: null,
         detectedName,
         updatedTitle,
@@ -1295,9 +1307,13 @@ chatRouter.patch(
 
 // Health check endpoint
 chatRouter.get('/health', (_req: Request, res: Response) => {
+  const aiRouting = getAIRoutingMetrics();
+  const canary = evaluateCanaryPolicy(aiRouting);
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
+    aiRouting,
+    canary,
   });
 });
 
@@ -1398,6 +1414,10 @@ chatRouter.post(
       const rawHistory: any[] = Array.isArray(req.body.history) ? req.body.history : [];
       const ocrPayload = await getOCRContextFromRequest(req);
       const hasUploadedImages = getUploadedImageFiles(req).length > 0;
+      const executionPlan = decideAgenticRoute({
+        message: content,
+        hasImageInput: hasUploadedImages,
+      });
       const aiInputContent = content || (hasUploadedImages
         ? 'This is an OpenCI screenshot. Analyze the attached image(s) and explain what is shown in OpenCI context.'
         : '');
@@ -1410,7 +1430,7 @@ chatRouter.post(
 
       let result: { text: string; detectedRole: string | null };
       try {
-        let locationReply = hasUploadedImages
+        let locationReply = executionPlan.route === 'multimodal_ai'
           ? null
           : resolveLocationIntentFromMessage(content, safeHistory, true, undefined);
         
@@ -1485,6 +1505,7 @@ chatRouter.post(
         success: true,
         aiMessage: { id: 'anon-' + Date.now(), role: 'assistant', content: result.text },
         ocrSummary: ocrPayload.summary,
+        executionPlan,
         detectedName,
         detectedRole,
       });

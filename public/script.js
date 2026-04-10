@@ -1360,7 +1360,10 @@ function animateAssistantMessage(contentEl, fullText) {
 }
 
 function addMessageToUI(role, content, attachmentsInput = []) {
-  const messageText = typeof content === 'string' ? content : String(content || '');
+  const rawMessageText = typeof content === 'string' ? content : String(content || '');
+  const messageText = role === 'assistant'
+    ? formatAssistantDisplayText(rawMessageText)
+    : rawMessageText;
   const hasMessageText = messageText.trim().length > 0;
   const attachments = Array.isArray(attachmentsInput)
     ? attachmentsInput.filter((item) => item && item.name)
@@ -1500,6 +1503,23 @@ function addMessageToUI(role, content, attachmentsInput = []) {
   if (autoScroll) {
     messagesWrapper.scrollTop = messagesWrapper.scrollHeight;
   }
+}
+
+function formatAssistantDisplayText(text) {
+  let output = String(text || '').replace(/\r\n/g, '\n');
+
+  const looksLikeEnumeratedList =
+    /\b(list|admins?|fieldm[ae]n|users?|steps?|modules?)\b/i.test(output) && /\d+\.\s/.test(output);
+
+  if (looksLikeEnumeratedList) {
+    output = output.replace(/:\s*(\d+\.\s)/g, ':\n$1');
+    output = output.replace(/\s+(?=\d+\.\s)/g, '\n');
+  }
+
+  // Normalize role separators for cleaner rendering.
+  output = output.replace(/\s*-\s*(Admin|Fieldman|User)\b/g, ' - $1');
+
+  return output;
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -2509,8 +2529,8 @@ function hasLocationChangedSignificantly(newPayload, oldPayload) {
 const locationHistory = [];
 const MAX_LOCATION_HISTORY = 10;
 const MAX_REALISTIC_SPEED_MPS = 120; // ~432 km/h (fast airplane)
-const MIN_ACCURACY_THRESHOLD = 120; // Warn if accuracy is weak for same-site tracking.
-const MAX_SYNC_ACCURACY_METERS = 300; // Reject coarse fixes to improve same-building precision.
+const MIN_ACCURACY_THRESHOLD = 80; // Warn early when precision drops below operational quality.
+const MAX_SYNC_ACCURACY_METERS = 120; // Reject coarse fixes to reduce inaccurate map/report coordinates.
 const MIN_SIGNIFICANT_MOVE_METERS = 25;
 
 /**
@@ -2582,6 +2602,19 @@ async function processGeoPosition(position, source = 'browser-gps') {
     ? Number(reportedAccuracy.toFixed(1))
     : null;
   const hasReliableFix = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= MAX_SYNC_ACCURACY_METERS;
+
+  if (!hasReliableFix) {
+    if (lastSyncedLocationPayload && Number.isFinite(Number(lastSyncedLocationPayload.lat)) && Number.isFinite(Number(lastSyncedLocationPayload.lng))) {
+      currentUserLocation = `${Number(lastSyncedLocationPayload.lat).toFixed(4)}, ${Number(lastSyncedLocationPayload.lng).toFixed(4)} (stable)`;
+      updateProfileUI();
+      await syncSessionLocation(lastSyncedLocationPayload, { heartbeat: true });
+    } else {
+      currentUserLocation = 'Waiting for precise GPS fix...';
+      updateProfileUI();
+    }
+    if (reloadLocationBtn) reloadLocationBtn.classList.remove('spinning');
+    return;
+  }
   
   // Anti-spoofing: Check for unrealistic movement
   const spoofCheck = detectLocationSpoofing(latitude, longitude, Date.now());

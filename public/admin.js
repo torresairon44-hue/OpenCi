@@ -581,7 +581,7 @@ function requestGeolocationAccess() {
         const accuracyMeters = Number.isFinite(reportedAccuracy) && reportedAccuracy >= 0 && reportedAccuracy <= 5000
           ? Number(reportedAccuracy.toFixed(1))
           : null;
-        const hasUsableFix = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= 300;
+        const hasUsableFix = Number.isFinite(accuracyMeters) && Number(accuracyMeters) <= 120;
 
         if (!hasUsableFix) {
           await syncFieldmanSessionLocation(null, { heartbeat: true });

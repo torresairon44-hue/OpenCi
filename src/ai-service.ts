@@ -24,6 +24,49 @@ let groqConnected = false;
 let availableModel = '';
 let groqLimitDetected = false;
 const googleAIClient = googleAIKey ? new GoogleGenerativeAI(googleAIKey) : null;
+const PROVIDER_FAILURE_THRESHOLD = parseInt(process.env.AI_PROVIDER_FAILURE_THRESHOLD || '3', 10);
+const PROVIDER_CIRCUIT_OPEN_MS = parseInt(process.env.AI_PROVIDER_CIRCUIT_OPEN_MS || '60000', 10);
+
+type ProviderName = 'groq' | 'google';
+
+interface ProviderCircuitState {
+  consecutiveFailures: number;
+  openedUntilMs: number;
+}
+
+const providerCircuitState: Record<ProviderName, ProviderCircuitState> = {
+  groq: { consecutiveFailures: 0, openedUntilMs: 0 },
+  google: { consecutiveFailures: 0, openedUntilMs: 0 },
+};
+
+const aiRoutingMetrics = {
+  requests: 0,
+  offTopicBlocked: 0,
+  fallbackUsed: 0,
+  groqCalls: 0,
+  groqFailures: 0,
+  googleCalls: 0,
+  googleFailures: 0,
+  safetyRejections: 0,
+};
+
+function isProviderCircuitOpen(provider: ProviderName): boolean {
+  return Date.now() < providerCircuitState[provider].openedUntilMs;
+}
+
+function recordProviderFailure(provider: ProviderName): void {
+  const state = providerCircuitState[provider];
+  state.consecutiveFailures += 1;
+  if (provider === 'groq') aiRoutingMetrics.groqFailures += 1;
+  if (provider === 'google') aiRoutingMetrics.googleFailures += 1;
+  if (state.consecutiveFailures >= PROVIDER_FAILURE_THRESHOLD) {
+    state.openedUntilMs = Date.now() + PROVIDER_CIRCUIT_OPEN_MS;
+  }
+}
+
+function recordProviderSuccess(provider: ProviderName): void {
+  providerCircuitState[provider] = { consecutiveFailures: 0, openedUntilMs: 0 };
+}
 
 export class AIProviderLimitError extends Error {
   provider: 'groq' | 'google';
@@ -157,19 +200,17 @@ ${CORE_KB}
 // ══════════════════════════════════════════════════════════════
 const demoResponses: { [key: string]: string[] } = {
   greeting: [
-    'Hi there! How can I help you today?',
-    'Hello! What can I assist you with?',
-    'Hey! What\'s on your mind?'
+    'Hi! OpenCI concern mo ba ito? Sabihin mo lang ang exact issue.',
+    'Hello! I can only help with OpenCI-related concerns. Ano po ang concern mo sa OpenCI?',
+    'Hi there! Para sa OpenCI support, pakisabi ang specific module or issue.'
   ],
   help: [
-    'I\'m here to help! You can ask me questions about OpenCI, troubleshoot issues, or just chat. What would you like to know?',
-    'I can assist with OpenCI modules, technical support, or general questions. What do you need help with?'
+    'I can help with OpenCI modules and troubleshooting only. Ano po ang concern mo sa OpenCI?',
+    'OpenCI support lang ang scope ko. Pakibigay ang exact OpenCI issue para ma-guide kita.'
   ],
   default: [
-    'That\'s interesting! Tell me more about what you\'re working on.',
-    'I understand. How can I help you with that?',
-    'Got it. What else would you like to know?',
-    'Thanks for sharing. Is there anything specific I can help with?'
+    'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?',
+    'OpenCI-related concerns only. Pakispecify ang issue mo sa OpenCI para ma-assist kita.'
   ]
 };
 
@@ -354,10 +395,22 @@ async function fetchRealUserDataIfRequested(
     };
   }
 
-  // Return the formatted context data so AI can present it naturally
+  // Deterministic grounded response to prevent model-side list blocking/hallucination drift.
+  const roleLabel = detection.requestType === 'admins'
+    ? 'admins'
+    : detection.requestType === 'fieldmen'
+      ? 'fieldmen'
+      : 'users';
+  const names = result.data
+    .map((item, index) => {
+      const title = item.role === 'admin' ? 'Admin' : item.role === 'fieldman' ? 'Fieldman' : 'User';
+      return `${index + 1}. ${item.username} - ${title}`;
+    })
+    .join('\n');
+
   return {
-    handled: false, // Let AI respond but with real data injected
-    response: null,
+    handled: true,
+    response: `Ito ang verified list ng ${roleLabel}:\n${names}`,
     contextData: formatUserListForAI(result)
   };
 }
@@ -378,6 +431,54 @@ export interface GenerateAIResponseOptions {
   imageAttachments?: ImageAttachment[];
   ocrExtractedText?: string;
   hasImageInput?: boolean;
+}
+
+function buildRetrievalQueries(userMessage: string, mainConcern: string): string[] {
+  const base = sanitizePromptControlContent(userMessage);
+  const concern = sanitizePromptControlContent(mainConcern || '');
+
+  const queries: string[] = [];
+  if (base) queries.push(base);
+  if (concern && concern.length > 2 && concern.toLowerCase() !== base.toLowerCase()) {
+    queries.push(`OpenCI ${concern}`);
+  }
+
+  return Array.from(new Set(queries));
+}
+
+function keywordOverlapScore(query: string, content: string): number {
+  const queryTokens = String(query || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4);
+
+  if (queryTokens.length === 0) return 0;
+
+  const contentLower = String(content || '').toLowerCase();
+  let hits = 0;
+  for (const token of queryTokens) {
+    if (contentLower.includes(token)) hits += 1;
+  }
+
+  return hits / queryTokens.length;
+}
+
+export function getAIRoutingMetrics() {
+  return {
+    ...aiRoutingMetrics,
+    providerCircuits: {
+      groq: {
+        open: isProviderCircuitOpen('groq'),
+        consecutiveFailures: providerCircuitState.groq.consecutiveFailures,
+        openedUntilMs: providerCircuitState.groq.openedUntilMs,
+      },
+      google: {
+        open: isProviderCircuitOpen('google'),
+        consecutiveFailures: providerCircuitState.google.consecutiveFailures,
+        openedUntilMs: providerCircuitState.google.openedUntilMs,
+      },
+    },
+  };
 }
 
 function applyImageInputFallback(text: string, options: GenerateAIResponseOptions): string {
@@ -409,6 +510,8 @@ export async function generateAIResponse(
   isAuthenticated: boolean = true,
   options: GenerateAIResponseOptions = {}
 ): Promise<{ text: string; detectedRole: string | null }> {
+  aiRoutingMetrics.requests += 1;
+
   // Keep role detection metadata-only for anonymous UX; never mutate DB role from chat text.
   const detectedRole = isAuthenticated ? null : detectRoleFromUserMessage(userMessage);
 
@@ -417,6 +520,7 @@ export async function generateAIResponse(
   // PRE-FLIGHT OFF-TOPIC DETECTION: Reject obviously off-topic requests before sending to AI
   const earlyRejection = detectOffTopicRequest(normalizedUserMessage);
   if (earlyRejection) {
+    aiRoutingMetrics.offTopicBlocked += 1;
     if (AI_RESPONSE_DELAY_MS > 0) {
       await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
     }
@@ -439,6 +543,9 @@ export async function generateAIResponse(
     realUserDataContext = `\n\n## VERIFIED USER DATA FROM DATABASE (USE THIS EXACTLY - DO NOT INVENT NAMES)\n${userDataResult.contextData}\n- IMPORTANT: Present ONLY the names listed above. Do NOT add, modify, or invent any names.`;
   }
 
+  // Detect user concern from message
+  const mainConcern = extractMainConcern(normalizedUserMessage);
+
   // Option B: Use vector store for semantic search if available
   // Anonymous users only get 'public' access-level documents
   let contextFromVectorStore = '';
@@ -447,12 +554,34 @@ export async function generateAIResponse(
       // Add embedding for this message
       await vectorStore.addConversationEmbedding(conversationId, normalizedUserMessage);
 
-      // Search for similar knowledge documents (filtered by access level)
+      // DeepRAG-lite: run multi-query retrieval and lightweight reranking.
       const accessLevel = isAuthenticated ? undefined : 'public';
-      const searchResults = await vectorStore.search(normalizedUserMessage, 3, 0.5, accessLevel);
+      const retrievalQueries = buildRetrievalQueries(normalizedUserMessage, mainConcern);
+      const candidateMap = new Map<string, any>();
+
+      for (const retrievalQuery of retrievalQueries) {
+        const rawResults = await vectorStore.search(retrievalQuery, 5, 0.35, accessLevel);
+        for (const item of rawResults) {
+          const previous = candidateMap.get(item.id);
+          if (!previous || Number(item.similarity || 0) > Number(previous.similarity || 0)) {
+            candidateMap.set(item.id, item);
+          }
+        }
+      }
+
+      const searchResults = Array.from(candidateMap.values())
+        .map((item) => {
+          const similarity = Number(item.similarity || 0);
+          const overlap = keywordOverlapScore(normalizedUserMessage, String(item.content || ''));
+          const finalScore = similarity * 0.8 + overlap * 0.2;
+          return { ...item, finalScore };
+        })
+        .sort((a, b) => b.finalScore - a.finalScore)
+        .slice(0, 4);
+
       if (searchResults.length > 0) {
         contextFromVectorStore = '\n\nRelevant Knowledge Base:\n' +
-          searchResults.map(r => `- [${r.type}] ${r.content.substring(0, 200)}`).join('\n');
+          searchResults.map(r => `- [${r.type}] ${r.content.substring(0, 220)}`).join('\n');
       }
     } catch (error) {
       console.log('Vector store search incomplete:', error instanceof Error ? error.message.substring(0, 50) : 'unknown');
@@ -472,9 +601,6 @@ export async function generateAIResponse(
       // Gracefully handle API unavailability
     }
   }
-
-  // Detect user concern from message
-  const mainConcern = extractMainConcern(normalizedUserMessage);
 
   // Build system prompt with all context
   // Inject user profile for logged-in users to skip name/role capture
@@ -555,8 +681,9 @@ User Profile Context: ${JSON.stringify(conversationHistory[0]?.context || {})}`;
     ? options.imageAttachments
     : (options.imageAttachment ? [options.imageAttachment] : []);
 
-  if (imageInputs.length > 0 && googleAIClient) {
+  if (imageInputs.length > 0 && googleAIClient && !isProviderCircuitOpen('google')) {
     try {
+      aiRoutingMetrics.googleCalls += 1;
       const visionModel = googleAIClient.getGenerativeModel({ model: GOOGLE_VISION_MODEL });
       
       // Sanitize conversation history before using it in vision prompt
@@ -590,6 +717,7 @@ Latest user message: ${normalizedUserMessage}`;
 
       const visionText = result.response.text();
       if (visionText) {
+        recordProviderSuccess('google');
         const cleanedText = applyImageInputFallback(enforceResponseSafety(visionText), options);
         if (AI_RESPONSE_DELAY_MS > 0) {
           await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
@@ -598,8 +726,10 @@ Latest user message: ${normalizedUserMessage}`;
       }
     } catch (error: any) {
       if (isProviderLimitError(error)) {
+        recordProviderFailure('google');
         throw new AIProviderLimitError('google', 'Google AI quota or rate limit reached', Number(error?.response?.status || 0));
       }
+      recordProviderFailure('google');
       console.log(`❌ ${GOOGLE_VISION_MODEL} image processing failed:`, error?.message || error);
     }
   }
@@ -608,8 +738,9 @@ Latest user message: ${normalizedUserMessage}`;
     throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', 429);
   }
 
-  if (availableModel && apiKey) {
+  if (availableModel && apiKey && !isProviderCircuitOpen('groq')) {
     try {
+      aiRoutingMetrics.groqCalls += 1;
       console.log(`🔗 Using Groq model: ${availableModel} with Icio v2.0 System Prompt...`);
       const response = await axios.post(
         'https://api.groq.com/openai/v1/chat/completions',
@@ -630,6 +761,7 @@ Latest user message: ${normalizedUserMessage}`;
 
       const text = response.data?.choices?.[0]?.message?.content;
       if (text) {
+        recordProviderSuccess('groq');
         const cleanedText = applyImageInputFallback(enforceResponseSafety(text), options);
         // Apply artificial delay so AI appears to "think" more thoroughly
         if (AI_RESPONSE_DELAY_MS > 0) {
@@ -640,14 +772,17 @@ Latest user message: ${normalizedUserMessage}`;
     } catch (error: any) {
       if (isProviderLimitError(error)) {
         groqLimitDetected = true;
+        recordProviderFailure('groq');
         throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', Number(error?.response?.status || 429));
       }
+      recordProviderFailure('groq');
       console.log(`❌ ${availableModel} failed:`, error?.response?.data || error.message);
     }
   }
 
   // Return demo response as fallback
   console.log('📋 Using demo response (real AI unavailable)');
+  aiRoutingMetrics.fallbackUsed += 1;
   // Apply delay even for demo responses for consistency
   if (AI_RESPONSE_DELAY_MS > 0) {
     await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
@@ -684,6 +819,7 @@ function enforceResponseSafety(text: string): string {
   ];
 
   if (leakagePatterns.some((p) => p.test(cleaned))) {
+    aiRoutingMetrics.safetyRejections += 1;
     return 'I-check ko muna ito with the OpenCI Team.';
   }
 
@@ -716,10 +852,12 @@ function enforceResponseSafety(text: string): string {
   
   if (looksLikeUserList && !hasVerifiedDataMarker) {
     // This is likely hallucinated user data
+    aiRoutingMetrics.safetyRejections += 1;
     return 'I-check ko muna ito with the OpenCI Team. Hindi ko po ma-access ang real-time user data directly.';
   }
 
   if (fakeUserDataPatterns.some((p) => p.test(cleaned))) {
+    aiRoutingMetrics.safetyRejections += 1;
     return 'I-check ko muna ito with the OpenCI Team. Hindi ko po ma-access ang real-time user data directly.';
   }
 
@@ -745,6 +883,7 @@ function enforceResponseSafety(text: string): string {
   ];
 
   if (offTopicPatterns.some((p) => p.test(cleaned))) {
+    aiRoutingMetrics.safetyRejections += 1;
     return 'Sorry, I can only help with OpenCI-related questions. Ano po ang concern mo sa OpenCI?';
   }
 
