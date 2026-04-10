@@ -174,6 +174,12 @@ Response Saved + Returned
 
 ## Deployment Instructions
 
+### Runtime Version Policy (Important)
+- Production runtime is pinned to Node.js `20.x` via `package.json` (`engines.node`).
+- Vercel uses `package.json` engines over Project Settings Node version.
+- Set Vercel Project Settings Node.js Version to `20.x` to avoid runtime mismatch warnings.
+- Repo includes `.nvmrc` and `.node-version` set to `20` for local and CI consistency.
+
 ### Step 1: Setup Environment
 ```bash
 # Navigate to project directory

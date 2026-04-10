@@ -1819,6 +1819,7 @@ body {
   font-size: 22px;
   line-height: 1;
   transform: translateY(-1px);
+  margin-top: 3px;
 }
 
 .btn-attach:hover:not(:disabled) {
