@@ -15,6 +15,7 @@
     "canary:check": "node scripts/canary-check.js",
     "kb:snapshot": "node scripts/kb-governance.js snapshot",
     "kb:verify": "node scripts/kb-governance.js verify",
+    "kb:ingestion:verify": "node scripts/kb-ingestion-verify.js",
     "smoke:health": "node scripts/smoke-health.js",
     "smoke:deploy": "npm run preflight && npm run smoke:health",
     "seed:admin-dummy": "ts-node scripts/seed-admin-dummy.ts",

@@ -13,7 +13,7 @@ dotenv.config();
 interface VectorDocument {
   id: string;
   content: string;
-  type: 'module' | 'workflow' | 'troubleshooting' | 'procedure' | 'faq';
+  type: 'module' | 'workflow' | 'troubleshooting' | 'procedure' | 'faq' | 'policy' | 'glossary';
   source: string;
   access_level?: 'public' | 'authenticated';
   embedding?: number[];

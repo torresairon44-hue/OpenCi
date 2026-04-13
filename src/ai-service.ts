@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import axios from 'axios';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import Redis from 'ioredis';
 import { OPENCI_SYSTEM_PROMPT, OPENCI_ANONYMOUS_KB, OPENCI_AUTHENTICATED_KB, extractMainConcern } from './openci-kb';
 import { VectorStore } from './vector-store';
 import { OpenCIAPI } from './openci-api';
@@ -20,9 +21,9 @@ const apiKey = process.env.GROQ_API_KEY;
 const googleAIKey = process.env.GOOGLE_AI_API_KEY;
 const AI_RESPONSE_DELAY_MS = parseInt(process.env.AI_RESPONSE_DELAY_MS || '3000', 10);
 const GOOGLE_VISION_MODEL = process.env.GOOGLE_VISION_MODEL || 'gemini-1.5-flash';
+const GOOGLE_TEXT_MODEL = process.env.GOOGLE_TEXT_MODEL || 'gemini-1.5-flash';
 let groqConnected = false;
 let availableModel = '';
-let groqLimitDetected = false;
 const googleAIClient = googleAIKey ? new GoogleGenerativeAI(googleAIKey) : null;
 const PROVIDER_FAILURE_THRESHOLD = parseInt(process.env.AI_PROVIDER_FAILURE_THRESHOLD || '3', 10);
 const PROVIDER_CIRCUIT_OPEN_MS = parseInt(process.env.AI_PROVIDER_CIRCUIT_OPEN_MS || '60000', 10);
@@ -50,16 +51,153 @@ const aiRoutingMetrics = {
   safetyRejections: 0,
 };
 
+type QueuedAIJob<T> = {
+  run: () => Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: any) => void;
+  enqueuedAtMs: number;
+};
+
+const AI_MAX_CONCURRENT_REQUESTS = parseInt(process.env.AI_MAX_CONCURRENT_REQUESTS || '8', 10);
+const AI_MAX_QUEUED_REQUESTS = parseInt(process.env.AI_MAX_QUEUED_REQUESTS || '60', 10);
+const AI_QUEUE_WAIT_TIMEOUT_MS = parseInt(process.env.AI_QUEUE_WAIT_TIMEOUT_MS || '15000', 10);
+const AI_DISTRIBUTED_MAX_INFLIGHT = parseInt(process.env.AI_DISTRIBUTED_MAX_INFLIGHT || String(Math.max(8, AI_MAX_CONCURRENT_REQUESTS)), 10);
+const AI_DISTRIBUTED_SLOT_TTL_SEC = parseInt(process.env.AI_DISTRIBUTED_SLOT_TTL_SEC || '120', 10);
+const AI_DISTRIBUTED_SLOT_RETRY_MS = parseInt(process.env.AI_DISTRIBUTED_SLOT_RETRY_MS || '80', 10);
+const REDIS_URL = String(process.env.REDIS_URL || '').trim();
+const DISTRIBUTED_INFLIGHT_KEY = String(process.env.AI_DISTRIBUTED_INFLIGHT_KEY || 'openci:ai:inflight').trim();
+let aiInFlightRequests = 0;
+const aiRequestQueue: Array<QueuedAIJob<any>> = [];
+let redisClient: Redis | null = null;
+
+function getRedisClient(): Redis | null {
+  if (!REDIS_URL) return null;
+  if (redisClient) return redisClient;
+
+  redisClient = new Redis(REDIS_URL, {
+    lazyConnect: true,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: true,
+  });
+
+  redisClient.on('error', (error) => {
+    console.warn('Redis unavailable for distributed AI guard:', error?.message || 'unknown error');
+  });
+
+  return redisClient;
+}
+
+async function sleepMs(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acquireDistributedAISlot(waitTimeoutMs: number): Promise<() => Promise<void>> {
+  const client = getRedisClient();
+  if (!client) {
+    return async () => {};
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= Math.max(500, waitTimeoutMs)) {
+    try {
+      if (client.status !== 'ready') {
+        await client.connect().catch(() => {});
+      }
+
+      const inFlight = await client.incr(DISTRIBUTED_INFLIGHT_KEY);
+      await client.expire(DISTRIBUTED_INFLIGHT_KEY, Math.max(30, AI_DISTRIBUTED_SLOT_TTL_SEC));
+      if (inFlight <= AI_DISTRIBUTED_MAX_INFLIGHT) {
+        return async () => {
+          try {
+            await client.decr(DISTRIBUTED_INFLIGHT_KEY);
+          } catch {
+            // Best effort release.
+          }
+        };
+      }
+
+      await client.decr(DISTRIBUTED_INFLIGHT_KEY);
+    } catch {
+      // Fail-open to preserve service availability if Redis is unstable.
+      return async () => {};
+    }
+
+    await sleepMs(Math.max(20, AI_DISTRIBUTED_SLOT_RETRY_MS));
+  }
+
+  throw createAIQueueBusyError();
+}
+
+async function runWithDistributedAISlot<T>(run: () => Promise<T>): Promise<T> {
+  const release = await acquireDistributedAISlot(AI_QUEUE_WAIT_TIMEOUT_MS);
+  try {
+    return await run();
+  } finally {
+    await release();
+  }
+}
+
+function createAIQueueBusyError(): Error {
+  const error: any = new Error('AI_QUEUE_BUSY');
+  error.code = 'AI_QUEUE_BUSY';
+  return error;
+}
+
+function drainAIQueue(): void {
+  while (aiInFlightRequests < AI_MAX_CONCURRENT_REQUESTS && aiRequestQueue.length > 0) {
+    const nextJob = aiRequestQueue.shift();
+    if (!nextJob) {
+      return;
+    }
+
+    const queueWaitMs = Date.now() - nextJob.enqueuedAtMs;
+    if (queueWaitMs > AI_QUEUE_WAIT_TIMEOUT_MS) {
+      nextJob.reject(createAIQueueBusyError());
+      continue;
+    }
+
+    aiInFlightRequests += 1;
+    runWithDistributedAISlot(nextJob.run)
+      .then(nextJob.resolve)
+      .catch(nextJob.reject)
+      .finally(() => {
+        aiInFlightRequests = Math.max(0, aiInFlightRequests - 1);
+        drainAIQueue();
+      });
+  }
+}
+
+async function runQueuedAIRequest<T>(run: () => Promise<T>): Promise<T> {
+  if (aiInFlightRequests < AI_MAX_CONCURRENT_REQUESTS && aiRequestQueue.length === 0) {
+    aiInFlightRequests += 1;
+    try {
+      return await runWithDistributedAISlot(run);
+    } finally {
+      aiInFlightRequests = Math.max(0, aiInFlightRequests - 1);
+      drainAIQueue();
+    }
+  }
+
+  if (aiRequestQueue.length >= AI_MAX_QUEUED_REQUESTS) {
+    throw createAIQueueBusyError();
+  }
+
+  return await new Promise<T>((resolve, reject) => {
+    aiRequestQueue.push({ run, resolve, reject, enqueuedAtMs: Date.now() });
+    drainAIQueue();
+  });
+}
+
 function isProviderCircuitOpen(provider: ProviderName): boolean {
   return Date.now() < providerCircuitState[provider].openedUntilMs;
 }
 
-function recordProviderFailure(provider: ProviderName): void {
+function recordProviderFailure(provider: ProviderName, forceOpen: boolean = false): void {
   const state = providerCircuitState[provider];
   state.consecutiveFailures += 1;
   if (provider === 'groq') aiRoutingMetrics.groqFailures += 1;
   if (provider === 'google') aiRoutingMetrics.googleFailures += 1;
-  if (state.consecutiveFailures >= PROVIDER_FAILURE_THRESHOLD) {
+  if (forceOpen || state.consecutiveFailures >= PROVIDER_FAILURE_THRESHOLD) {
     state.openedUntilMs = Date.now() + PROVIDER_CIRCUIT_OPEN_MS;
   }
 }
@@ -502,7 +640,7 @@ function applyImageInputFallback(text: string, options: GenerateAIResponseOption
   return 'Nakita ko na may attached image ka. I can analyze OpenCI screenshots; pakisabi ang specific issue sa image para ma-guide kita step by step.';
 }
 
-export async function generateAIResponse(
+async function generateAIResponseCore(
   userMessage: string,
   conversationHistory: any[] = [],
   conversationId?: string,
@@ -680,6 +818,7 @@ User Profile Context: ${JSON.stringify(conversationHistory[0]?.context || {})}`;
   const imageInputs = Array.isArray(options.imageAttachments) && options.imageAttachments.length > 0
     ? options.imageAttachments
     : (options.imageAttachment ? [options.imageAttachment] : []);
+  const providerLimitSignals: Array<'groq' | 'google'> = [];
 
   if (imageInputs.length > 0 && googleAIClient && !isProviderCircuitOpen('google')) {
     try {
@@ -726,16 +865,13 @@ Latest user message: ${normalizedUserMessage}`;
       }
     } catch (error: any) {
       if (isProviderLimitError(error)) {
+        providerLimitSignals.push('google');
+        recordProviderFailure('google', true);
+      } else {
         recordProviderFailure('google');
-        throw new AIProviderLimitError('google', 'Google AI quota or rate limit reached', Number(error?.response?.status || 0));
+        console.log(`❌ ${GOOGLE_VISION_MODEL} image processing failed:`, error?.message || error);
       }
-      recordProviderFailure('google');
-      console.log(`❌ ${GOOGLE_VISION_MODEL} image processing failed:`, error?.message || error);
     }
-  }
-
-  if (apiKey && groqLimitDetected) {
-    throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', 429);
   }
 
   if (availableModel && apiKey && !isProviderCircuitOpen('groq')) {
@@ -771,13 +907,56 @@ Latest user message: ${normalizedUserMessage}`;
       }
     } catch (error: any) {
       if (isProviderLimitError(error)) {
-        groqLimitDetected = true;
+        providerLimitSignals.push('groq');
+        recordProviderFailure('groq', true);
+      } else {
         recordProviderFailure('groq');
-        throw new AIProviderLimitError('groq', 'Groq quota or rate limit reached', Number(error?.response?.status || 429));
+        console.log(`❌ ${availableModel} failed:`, error?.response?.data || error.message);
       }
-      recordProviderFailure('groq');
-      console.log(`❌ ${availableModel} failed:`, error?.response?.data || error.message);
     }
+  }
+
+  // Text failover via Google AI when Groq is degraded or unavailable.
+  if (googleAIClient && !isProviderCircuitOpen('google')) {
+    try {
+      aiRoutingMetrics.googleCalls += 1;
+      const textModel = googleAIClient.getGenerativeModel({ model: GOOGLE_TEXT_MODEL });
+      const historySummary = sanitizedHistory
+        .slice(-8)
+        .map((m: any) => `${m.role === 'assistant' ? 'Assistant' : 'User'}: ${String(m.content).substring(0, 500)}`)
+        .join('\n');
+
+      const textPrompt = `${systemPrompt}
+
+Conversation History:
+${historySummary || 'No prior messages.'}
+
+Latest user message: ${normalizedUserMessage}`;
+
+      const result = await textModel.generateContent([{ text: textPrompt }] as any);
+      const text = result.response.text();
+      if (text) {
+        recordProviderSuccess('google');
+        const cleanedText = applyImageInputFallback(enforceResponseSafety(text), options);
+        if (AI_RESPONSE_DELAY_MS > 0) {
+          await new Promise(resolve => setTimeout(resolve, AI_RESPONSE_DELAY_MS));
+        }
+        return { text: cleanedText, detectedRole };
+      }
+    } catch (error: any) {
+      if (isProviderLimitError(error)) {
+        providerLimitSignals.push('google');
+        recordProviderFailure('google', true);
+      } else {
+        recordProviderFailure('google');
+        console.log(`❌ ${GOOGLE_TEXT_MODEL} text generation failed:`, error?.message || error);
+      }
+    }
+  }
+
+  if (providerLimitSignals.length > 0) {
+    const preferredProvider: 'groq' | 'google' = providerLimitSignals.includes('groq') ? 'groq' : 'google';
+    throw new AIProviderLimitError(preferredProvider, 'AI provider quota or rate limit reached', 429);
   }
 
   // Return demo response as fallback
@@ -790,6 +969,39 @@ Latest user message: ${normalizedUserMessage}`;
   return {
     text: applyImageInputFallback(enforceResponseSafety(generateDemoResponse(normalizedUserMessage)), options),
     detectedRole
+  };
+}
+
+export async function generateAIResponse(
+  userMessage: string,
+  conversationHistory: any[] = [],
+  conversationId?: string,
+  userProfile?: UserProfile,
+  isAuthenticated: boolean = true,
+  options: GenerateAIResponseOptions = {}
+): Promise<{ text: string; detectedRole: string | null }> {
+  return runQueuedAIRequest(() =>
+    generateAIResponseCore(
+      userMessage,
+      conversationHistory,
+      conversationId,
+      userProfile,
+      isAuthenticated,
+      options
+    )
+  );
+}
+
+export function getAIQueueMetrics() {
+  const distributedEnabled = Boolean(REDIS_URL);
+  return {
+    inFlight: aiInFlightRequests,
+    queued: aiRequestQueue.length,
+    maxConcurrent: AI_MAX_CONCURRENT_REQUESTS,
+    maxQueued: AI_MAX_QUEUED_REQUESTS,
+    waitTimeoutMs: AI_QUEUE_WAIT_TIMEOUT_MS,
+    distributedEnabled,
+    distributedMaxInFlight: distributedEnabled ? AI_DISTRIBUTED_MAX_INFLIGHT : null,
   };
 }
 
@@ -827,7 +1039,7 @@ function enforceResponseSafety(text: string): string {
   // Only block if we DON'T have real data context (realUserDataContext would be in prompt)
   const fakeUserDataPatterns = [
     // Common fake Filipino/generic names that AI invents
-    /\b(john\s+doe|jane\s+smith|juan\s+dela\s+cruz|maria\s+rodriguez|mark\s+davis|michael\s+tan|ronald\s+airon\s+torres)\b/i,
+    /\b(john\s+doe|jane\s+smith|juan\s+dela\s+cruz|maria\s+rodriguez|mark\s+davis|michael\s+tan)\b/i,
     // Fake user list patterns - "list of admins: 1."
     /\b(list\s+of\s+(admins?|fieldm[ae]n|users?|employees?|agents?))\s*[:]\s*\d+\./i,
     // Fake status patterns with invented names
@@ -924,7 +1136,7 @@ function postProcessGuardrail(text: string): string {
 }
 
 export async function extractProblemTitle(conversationHistory: any[]): Promise<string | null> {
-  if (!apiKey || !availableModel) return null;
+  if (!apiKey || !availableModel || isProviderCircuitOpen('groq')) return null;
   try {
     const recentMessages = conversationHistory.slice(-8);
     const msgs = [
@@ -945,7 +1157,12 @@ export async function extractProblemTitle(conversationHistory: any[]): Promise<s
     const title = response.data?.choices?.[0]?.message?.content?.trim();
     if (!title || title.toUpperCase() === 'NONE') return null;
     return title.length > 60 ? title.substring(0, 57) + '...' : title;
-  } catch {
+  } catch (error: any) {
+    if (isProviderLimitError(error)) {
+      recordProviderFailure('groq', true);
+    } else {
+      recordProviderFailure('groq');
+    }
     return null;
   }
 }
@@ -990,7 +1207,9 @@ export async function testConnection(): Promise<boolean> {
       const statusText = error?.response?.statusText;
       const errorData = error?.response?.data;
       if (isProviderLimitError(error)) {
-        groqLimitDetected = true;
+        recordProviderFailure('groq', true);
+      } else {
+        recordProviderFailure('groq');
       }
       console.log(`   ❌ API Error: ${statusCode} ${statusText || ''}`);
       if (errorData) {

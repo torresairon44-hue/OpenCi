@@ -7,7 +7,7 @@ import multer from 'multer';
 import rateLimit from 'express-rate-limit';
 import { createWorker } from 'tesseract.js';
 import { runQuery, executeQuery } from './database';
-import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment, AIProviderLimitError, getAIRoutingMetrics } from './ai-service';
+import { generateAIResponse, extractProblemTitle, UserProfile, ImageAttachment, AIProviderLimitError, getAIRoutingMetrics, getAIQueueMetrics } from './ai-service';
 import { getCoordinates, getLocationFromCoordinates, formatCoordinates } from './location-service';
 import { requireAuth } from './auth';
 import { chatRateLimiter, resetRateLimit } from './rate-limiter';
@@ -1108,6 +1108,13 @@ chatRouter.post(
           });
           return;
         }
+        if ((error as any)?.code === 'AI_QUEUE_BUSY') {
+          res.status(503).json({
+            error: 'ai_queue_busy',
+            message: 'AI service is handling high traffic. Please retry in a few seconds.',
+          });
+          return;
+        }
         console.error('AI generation error:', error);
         aiResponse = 'I apologize, but I encountered an error while processing your request. Please try again.';
       }
@@ -1308,11 +1315,13 @@ chatRouter.patch(
 // Health check endpoint
 chatRouter.get('/health', (_req: Request, res: Response) => {
   const aiRouting = getAIRoutingMetrics();
+  const aiQueue = getAIQueueMetrics();
   const canary = evaluateCanaryPolicy(aiRouting);
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
     aiRouting,
+    aiQueue,
     canary,
   });
 });
@@ -1477,6 +1486,13 @@ chatRouter.post(
             error: 'ai_provider_limit_reached',
             provider: error.provider,
             message: 'AI service limit reached. Please try again later.',
+          });
+          return;
+        }
+        if ((error as any)?.code === 'AI_QUEUE_BUSY') {
+          res.status(503).json({
+            error: 'ai_queue_busy',
+            message: 'AI service is handling high traffic. Please retry in a few seconds.',
           });
           return;
         }

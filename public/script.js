@@ -2991,6 +2991,24 @@ function completeCaptchaSuccess() {
   messageInput.focus();
 }
 
+function showCaptchaInlineError(message) {
+  const errorEl = document.getElementById('captchaError');
+  if (errorEl) {
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+  }
+}
+
+function fallbackToLocalCaptcha(message) {
+  recaptchaEnabled = false;
+  recaptchaWidgetId = null;
+  localCaptchaAttemptCount = 0;
+  renderLocalCaptchaChallenge();
+  if (message) {
+    showCaptchaInlineError(message);
+  }
+}
+
 function showCaptchaFailure(message) {
   const errorEl = document.getElementById('captchaError');
   if (errorEl) {
@@ -3015,6 +3033,11 @@ async function verifyRecaptchaToken(token) {
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.success !== true) {
+      const errorCode = typeof data?.error === 'string' ? data.error : '';
+      if (errorCode === 'captcha_not_configured' || errorCode === 'captcha_verification_failed') {
+        fallbackToLocalCaptcha('reCAPTCHA is temporarily unavailable. Use quick verification below.');
+        return;
+      }
       showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
       return;
     }
@@ -3041,22 +3064,26 @@ function renderRecaptchaWidget() {
     } catch (error) {
       console.warn('reCAPTCHA reset warning:', error);
     }
-    return;
   }
 
-  recaptchaWidgetId = recaptchaApi.render('captchaRecaptchaWidget', {
-    sitekey: recaptchaSiteKey,
-    theme: 'light',
-    callback: (token) => {
-      verifyRecaptchaToken(token);
-    },
-    'expired-callback': () => {
-      showCaptchaFailure('Verification expired. Locked out for 5 minutes.');
-    },
-    'error-callback': () => {
-      showCaptchaFailure('Verification failed! Locked out for 5 minutes.');
-    },
-  });
+  try {
+    recaptchaWidgetId = recaptchaApi.render('captchaRecaptchaWidget', {
+      sitekey: recaptchaSiteKey,
+      theme: 'light',
+      callback: (token) => {
+        verifyRecaptchaToken(token);
+      },
+      'expired-callback': () => {
+        fallbackToLocalCaptcha('Verification expired. Use quick verification below.');
+      },
+      'error-callback': () => {
+        fallbackToLocalCaptcha('reCAPTCHA failed to load. Use quick verification below.');
+      },
+    });
+  } catch (error) {
+    console.error('reCAPTCHA render failed, switching to local fallback:', error);
+    fallbackToLocalCaptcha('reCAPTCHA failed to initialize. Use quick verification below.');
+  }
 }
 
 function renderLocalCaptchaChallenge() {
@@ -3255,6 +3282,7 @@ function showCaptcha() {
   const widgetWrap = document.getElementById('captchaRecaptchaWrap');
   if (widgetWrap) {
     widgetWrap.innerHTML = '<div id="captchaRecaptchaWidget"></div>';
+    recaptchaWidgetId = null;
   }
 
   if (recaptchaEnabled && recaptchaSiteKey) {

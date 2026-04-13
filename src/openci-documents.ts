@@ -5,6 +5,8 @@
  */
 
 import { VectorDocument } from './vector-store';
+import fs from 'fs';
+import path from 'path';
 
 export const OPENCI_SAMPLE_DOCUMENTS: VectorDocument[] = [
   // ═══════════════════════════════════════════════════════════════
@@ -449,14 +451,177 @@ A: Within 100 feet (30 meters) of actual location for valid tagging.`,
   },
 ];
 
+type ParsedFrontmatter = {
+  values: Record<string, string | string[]>;
+  body: string;
+};
+
+const KB_ROOT_DIR = path.join(process.cwd(), 'kb');
+const KB_ALLOWED_TYPES = new Set<VectorDocument['type']>([
+  'module',
+  'workflow',
+  'troubleshooting',
+  'procedure',
+  'faq',
+  'policy',
+  'glossary',
+]);
+
+const KB_ALLOWED_ACCESS = new Set<string>(['public', 'authenticated']);
+
+function toPosix(relativePath: string): string {
+  return relativePath.split(path.sep).join('/');
+}
+
+function collectKbMarkdownFiles(dir: string): string[] {
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  const files: string[] = [];
+
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relative = toPosix(path.relative(KB_ROOT_DIR, fullPath));
+
+    if (entry.isDirectory()) {
+      if (relative.startsWith('snapshots')) continue;
+      files.push(...collectKbMarkdownFiles(fullPath));
+      continue;
+    }
+
+    if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}
+
+function parseFrontmatter(raw: string): ParsedFrontmatter | null {
+  if (!raw.startsWith('---\n')) {
+    return null;
+  }
+
+  const endMarker = raw.indexOf('\n---\n', 4);
+  if (endMarker < 0) {
+    return null;
+  }
+
+  const fmText = raw.slice(4, endMarker);
+  const body = raw.slice(endMarker + 5).trim();
+  const lines = fmText.split(/\r?\n/);
+  const values: Record<string, string | string[]> = {};
+  let currentArrayKey: string | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+
+    if (/^-[\s]+/.test(trimmed) && currentArrayKey) {
+      const itemValue = trimmed.replace(/^-[\s]+/, '').trim();
+      const existing = values[currentArrayKey];
+      if (Array.isArray(existing)) {
+        existing.push(itemValue);
+      } else {
+        values[currentArrayKey] = [itemValue];
+      }
+      continue;
+    }
+
+    const separatorIdx = trimmed.indexOf(':');
+    if (separatorIdx < 0) {
+      continue;
+    }
+
+    const key = trimmed.slice(0, separatorIdx).trim();
+    const rawValue = trimmed.slice(separatorIdx + 1).trim();
+
+    if (!key) {
+      continue;
+    }
+
+    if (!rawValue) {
+      values[key] = [];
+      currentArrayKey = key;
+      continue;
+    }
+
+    values[key] = rawValue.replace(/^['"]|['"]$/g, '');
+    currentArrayKey = null;
+  }
+
+  return { values, body };
+}
+
+export function loadApprovedMarkdownKbDocuments(): VectorDocument[] {
+  if (!fs.existsSync(KB_ROOT_DIR)) {
+    return [];
+  }
+
+  const files = collectKbMarkdownFiles(KB_ROOT_DIR).sort((a, b) => a.localeCompare(b));
+  const docs: VectorDocument[] = [];
+
+  for (const fullPath of files) {
+    try {
+      const raw = fs.readFileSync(fullPath, 'utf8');
+      const parsed = parseFrontmatter(raw);
+      if (!parsed) {
+        continue;
+      }
+
+      const status = String(parsed.values.status || '').toLowerCase();
+      if (status !== 'approved') {
+        continue;
+      }
+
+      const id = String(parsed.values.id || '').trim();
+      const type = String(parsed.values.type || '').trim().toLowerCase();
+      const accessLevel = String(parsed.values.access_level || '').trim().toLowerCase();
+      const title = String(parsed.values.title || '').trim();
+
+      if (!id || !title || !KB_ALLOWED_TYPES.has(type as VectorDocument['type'])) {
+        continue;
+      }
+
+      const safeAccessLevel = KB_ALLOWED_ACCESS.has(accessLevel) ? accessLevel : 'authenticated';
+      const relativePath = toPosix(path.relative(KB_ROOT_DIR, fullPath));
+      docs.push({
+        id,
+        type: type as VectorDocument['type'],
+        source: `kb_markdown:${relativePath}`,
+        access_level: safeAccessLevel as 'public' | 'authenticated',
+        content: `${title}\n\n${parsed.body}`.trim(),
+      });
+    } catch {
+      // Skip malformed markdown files to keep startup resilient.
+    }
+  }
+
+  return docs;
+}
+
 /**
  * Initialize vector store with sample documents
  */
 export async function loadSampleDocuments(vectorStore: any): Promise<void> {
   try {
-    console.log(`\n📚 Loading ${OPENCI_SAMPLE_DOCUMENTS.length} sample documents into vector store...`);
-    
-    await vectorStore.bulkAddDocuments(OPENCI_SAMPLE_DOCUMENTS);
+    const markdownDocs = loadApprovedMarkdownKbDocuments();
+    const merged = new Map<string, VectorDocument>();
+
+    for (const doc of OPENCI_SAMPLE_DOCUMENTS) {
+      merged.set(doc.id, doc);
+    }
+
+    for (const doc of markdownDocs) {
+      merged.set(doc.id, doc);
+    }
+
+    const combinedDocs = Array.from(merged.values());
+    console.log(`\n📚 Loading ${combinedDocs.length} KB documents into vector store...`);
+    console.log(`   - Static fallback docs: ${OPENCI_SAMPLE_DOCUMENTS.length}`);
+    console.log(`   - Approved markdown docs: ${markdownDocs.length}`);
+
+    await vectorStore.bulkAddDocuments(combinedDocs);
     
     const stats = await vectorStore.getStats();
     console.log(`✓ Vector store loaded successfully!`);
